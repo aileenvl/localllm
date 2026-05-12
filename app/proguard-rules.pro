@@ -1,19 +1,15 @@
 # LocalLLM ProGuard / R8 rules
 #
-# This app uses heavy reflection through MediaPipe natives, Ktor, Netty and
+# This app uses heavy reflection through LiteRT-LM natives, Ktor, Netty and
 # Gson. Without these keeps, an R8-minified release build will silently break
 # at request time — long after the build succeeded.
 
-# --- MediaPipe Tasks GenAI ---------------------------------------------------
-# The genai jar bridges into native code via reflective JNI lookups.
--keep class com.google.mediapipe.** { *; }
--keep class com.google.mediapipe.tasks.genai.** { *; }
--keepclassmembers class com.google.mediapipe.** { *; }
--dontwarn com.google.mediapipe.**
-
-# Protobuf descriptors used by MediaPipe options
--keep class com.google.protobuf.** { *; }
--dontwarn com.google.protobuf.**
+# --- LiteRT-LM (Google AI Edge) ---------------------------------------------
+# LiteRT-LM bridges into native code via JNI and performs reflective class
+# lookups for engine/runtime wiring. R8 would otherwise strip or rename the
+# JNI-visible classes/members, breaking inference at first call.
+-keep class com.google.ai.edge.litertlm.** { *; }
+-dontwarn com.google.ai.edge.litertlm.**
 
 # --- Ktor server + Netty ----------------------------------------------------
 -keep class io.ktor.** { *; }

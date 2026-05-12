@@ -20,9 +20,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.ui.res.stringResource
 import androidx.compose.runtime.collectAsState
@@ -47,9 +47,15 @@ import com.localllm.app.ui.ModelsTab
 import com.localllm.app.ui.SettingsTab
 import com.localllm.app.ui.UiMessage
 import com.localllm.app.ui.sendChatMessage
+import java.io.BufferedInputStream
 import java.io.File
+import java.security.DigestInputStream
+import java.security.MessageDigest
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Top-level Activity. All it does is:
@@ -88,12 +94,16 @@ class MainActivity : ComponentActivity() {
             var isChatting by remember { mutableStateOf(false) }
             val chatListState = rememberLazyListState()
             var selectedModel by remember { mutableStateOf("") }
+            var chatJob by remember { mutableStateOf<Job?>(null) }
+            var chatTokenRate by remember { mutableStateOf(0.0) }
+            var chatTokenCount by remember { mutableStateOf(0) }
+            var chatElapsedMs by remember { mutableStateOf(0L) }
 
             var customUrls by remember { mutableStateOf(Settings.customModelUrls(context)) }
 
             LaunchedEffect(existingModels) {
                 if (selectedModel.isEmpty() && existingModels.isNotEmpty()) {
-                    selectedModel = existingModels.first().removeSuffix(".task")
+                    selectedModel = existingModels.first().removeSuffix(".litertlm")
                 }
             }
 
@@ -133,6 +143,24 @@ class MainActivity : ComponentActivity() {
                                 val status = cursor.getInt(statusIdx)
                                 if (status == DownloadManager.STATUS_SUCCESSFUL || status == DownloadManager.STATUS_FAILED) {
                                     toRemove.add(filename)
+                                    if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                                        // Hashing a multi-GB file is slow (~20s); run off the
+                                        // polling loop so progress for other downloads keeps
+                                        // updating. Verification is a no-op when sha256 == null.
+                                        coroutineScope.launch {
+                                            val ok = withContext(Dispatchers.IO) {
+                                                verifyDownloadedModel(filename)
+                                            }
+                                            if (ok == false) {
+                                                existingModels = existingModels - filename
+                                                Toast.makeText(
+                                                    context,
+                                                    "Model verification failed: $filename",
+                                                    Toast.LENGTH_LONG
+                                                ).show()
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             if (downloadedIdx != -1 && totalIdx != -1) {
@@ -176,10 +204,10 @@ class MainActivity : ComponentActivity() {
                             val nameIndex = cursor?.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
                             cursor?.moveToFirst()
                             var name = if (nameIndex != null && nameIndex >= 0)
-                                cursor?.getString(nameIndex) ?: "imported_model.task"
-                            else "imported_model.task"
+                                cursor?.getString(nameIndex) ?: "imported_model.litertlm"
+                            else "imported_model.litertlm"
                             cursor?.close()
-                            if (!name.endsWith(".task")) name = "$name.task"
+                            if (!name.endsWith(".litertlm")) name = "$name.litertlm"
 
                             val destFile = getModelFile(name)
                             context.contentResolver.openInputStream(uri)?.use { input ->
@@ -224,13 +252,24 @@ class MainActivity : ComponentActivity() {
                             }
                         )
 
-                        TabRow(
+                        ScrollableTabRow(
                             selectedTabIndex = activeTab.ordinal,
                             containerColor = MaterialTheme.colorScheme.surface,
-                            contentColor = MaterialTheme.colorScheme.primary
+                            contentColor = MaterialTheme.colorScheme.primary,
+                            edgePadding = 0.dp
                         ) {
                             AppTab.values().forEach { t ->
-                                Tab(selected = activeTab == t, onClick = { activeTab = t }, text = { Text(stringResource(t.labelRes)) })
+                                Tab(
+                                    selected = activeTab == t,
+                                    onClick = { activeTab = t },
+                                    text = {
+                                        Text(
+                                            stringResource(t.labelRes),
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                    }
+                                )
                             }
                         }
 
@@ -261,12 +300,15 @@ class MainActivity : ComponentActivity() {
                                     chatInput = chatInput,
                                     onInputChange = { chatInput = it },
                                     isChatting = isChatting,
-                                    onSend = {
+                                    onSend = { systemPrompt ->
                                         val toSend = chatInput.trim()
                                         val url = ServerState.boundUrl.value
                                         if (toSend.isNotEmpty() && !isChatting && url != null) {
                                             chatInput = ""
-                                            sendChatMessage(
+                                            chatTokenRate = 0.0
+                                            chatTokenCount = 0
+                                            chatElapsedMs = 0L
+                                            chatJob = sendChatMessage(
                                                 messages = chatMessages,
                                                 input = toSend,
                                                 model = selectedModel,
@@ -274,11 +316,23 @@ class MainActivity : ComponentActivity() {
                                                 apiKey = Settings.apiKey(context),
                                                 coroutineScope = coroutineScope,
                                                 listState = chatListState,
-                                                onChattingChange = { isChatting = it }
+                                                onChattingChange = { isChatting = it },
+                                                systemPrompt = systemPrompt,
+                                                onTokenRate = { rate, count, elapsed ->
+                                                    chatTokenRate = rate
+                                                    chatTokenCount = count
+                                                    chatElapsedMs = elapsed
+                                                }
                                             )
                                         }
                                     },
-                                    chatListState = chatListState
+                                    onStop = {
+                                        chatJob?.cancel()
+                                    },
+                                    chatListState = chatListState,
+                                    tokenRate = chatTokenRate,
+                                    tokenCount = chatTokenCount,
+                                    streamElapsedMs = chatElapsedMs
                                 )
                                 AppTab.SETTINGS -> SettingsTab(
                                     context = context,
@@ -322,10 +376,46 @@ class MainActivity : ComponentActivity() {
     private fun stopServer() {
         stopService(Intent(this, LLMServerService::class.java))
     }
+
+    /**
+     * Returns `true` on hash match, `false` on mismatch (file deleted as a
+     * side effect), `null` when no expected hash is recorded (custom URLs).
+     * Caller is responsible for surfacing the mismatch to the user and
+     * removing the entry from in-memory `existingModels`.
+     */
+    private fun verifyDownloadedModel(filename: String): Boolean? {
+        val expected = AVAILABLE_MODELS.firstOrNull { it.filename == filename }?.sha256
+        if (expected == null) {
+            LogManager.w("DownloadVerify", "$filename has no expected hash; skipping verification")
+            return null
+        }
+        val file = getModelFile(filename)
+        if (!file.exists()) {
+            LogManager.e("DownloadVerify", "$filename missing on disk; cannot verify")
+            return false
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        DigestInputStream(BufferedInputStream(file.inputStream(), 64 * 1024), digest).use { input ->
+            val buf = ByteArray(64 * 1024)
+            while (input.read(buf) != -1) { /* digest updated as a side effect */ }
+        }
+        val actual = digest.digest().joinToString("") { "%02x".format(it) }
+        return if (actual == expected.lowercase()) {
+            LogManager.i("DownloadVerify", "Verified $filename (sha256 match)")
+            true
+        } else {
+            LogManager.e(
+                "DownloadVerify",
+                "Hash mismatch for $filename: expected=$expected actual=$actual"
+            )
+            file.delete()
+            false
+        }
+    }
 }
 
 private inline fun refreshExistingModels(context: Context, update: (Set<String>) -> Unit) {
     val dir = context.getExternalFilesDir(null)
-    val files = dir?.listFiles { file -> file.name.endsWith(".task") } ?: emptyArray()
+    val files = dir?.listFiles { file -> file.name.endsWith(".litertlm") } ?: emptyArray()
     update(files.map { it.name }.toSet())
 }

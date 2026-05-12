@@ -27,6 +27,12 @@ object LogManager {
         android.util.Log.i(tag, message)
     }
 
+    fun w(tag: String, message: String) {
+        val entry = LogEntry(System.currentTimeMillis(), "WARN", "[$tag] $message")
+        _logs.tryEmit(entry)
+        android.util.Log.w(tag, message)
+    }
+
     fun e(tag: String, message: String, throwable: Throwable? = null) {
         val errMessage = throwable?.let { "$message: ${it.message}" } ?: message
         val entry = LogEntry(System.currentTimeMillis(), "ERROR", "[$tag] $errMessage")

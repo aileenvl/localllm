@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!--
+        LocalLLM launcher foreground.
+
+        Composition: a rounded-square "chip" outline carrying a chat-bubble
+        notch at the bottom-right corner, with three centered dots inside
+        (the classic typing indicator). Together they read as "on-device
+        compute + conversation" — i.e., an LLM running locally.
+
+        Adaptive-icon safe zone is the central 72×72 region (24..84 on both
+        axes). All visible glyph geometry lives inside that box so it
+        survives every device-shape mask (circle, squircle, rounded square,
+        teardrop).
+    -->
+
+    <!-- Chip body: rounded square outline. Stroke-only; the gradient
+         background shows through. -->
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="
+            M 38,30
+            L 70,30
+            A 8,8 0 0 1 78,38
+            L 78,62
+            L 70,70
+            L 62,70
+            L 56,76
+            L 50,70
+            L 38,70
+            A 8,8 0 0 1 30,62
+            L 30,38
+            A 8,8 0 0 1 38,30
+            Z" />
+
+    <!-- Three typing-indicator dots, centered horizontally at y=50. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="
+            M 41,50
+            a 3,3 0 1 0 6,0
+            a 3,3 0 1 0 -6,0
+            Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="
+            M 51,50
+            a 3,3 0 1 0 6,0
+            a 3,3 0 1 0 -6,0
+            Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="
+            M 61,50
+            a 3,3 0 1 0 6,0
+            a 3,3 0 1 0 -6,0
+            Z" />
+
+    <!-- A small "active" spark dot top-right, signaling the chip is live. -->
+    <path
+        android:fillColor="#FFB45A"
+        android:pathData="
+            M 72,30
+            a 4,4 0 1 0 8,0
+            a 4,4 0 1 0 -8,0
+            Z" />
+</vector>

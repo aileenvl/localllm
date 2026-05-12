@@ -26,7 +26,7 @@ data class ChatRequest(
      * the server caches the `LlmInferenceSession` for this ID and only
      * `addQueryChunk`s the new turns on follow-up requests.
      */
-    @SerializedName("session_id") val sessionId: String = "",
+    @SerializedName("session_id") val sessionId: String? = null,
     val temperature: Float? = null,
     @SerializedName("top_k") val topK: Int? = null,
     @SerializedName("max_tokens") val maxTokens: Int? = null

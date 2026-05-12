@@ -21,19 +21,25 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.ContentType
 import io.ktor.http.CacheControl
 import io.ktor.utils.io.*
-import com.google.mediapipe.tasks.genai.llminference.LlmInference
-import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession
+import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Content
+import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.Conversation
+import com.google.ai.edge.litertlm.ConversationConfig
+import com.google.ai.edge.litertlm.Engine
+import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.Role
+import com.google.ai.edge.litertlm.SamplerConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -44,6 +50,7 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import com.google.gson.Gson
 import android.util.LruCache
+import com.google.ai.edge.litertlm.Message as LlmMessage
 
 /**
  * Process-wide server state. The UI observes this to render the status badge,
@@ -67,29 +74,36 @@ object ServerState {
 }
 
 class LLMServerService : Service() {
-    private var server: NettyApplicationEngine? = null
+    private var server: EmbeddedServer<NettyApplicationEngine, NettyApplicationEngine.Configuration>? = null
 
     /**
-     * Engine cache. Keyed by `model_maxTokens_backend` because MediaPipe's
-     * `LlmInferenceOptions.setMaxTokens` is the *total* KV-cache budget
+     * Engine cache. Keyed by `model_maxTokens_backend` because LiteRT-LM's
+     * `EngineConfig.maxNumTokens` is the *total* KV-cache budget
      * (input + output), not just an output cap. Reusing an engine built
      * with a larger budget for a request that asked for less would let the
      * model overgenerate. Each model takes 1–2 GB so we keep at most 2 resident.
      *
-     * When an engine is evicted, every session that holds a handle to it is
-     * also evicted first — sessions can't outlive their parent engine.
+     * When an engine is evicted, every conversation that holds a handle to it is
+     * also evicted first — conversations can't outlive their parent engine.
      */
-    private val engines = object : LruCache<String, LlmInference>(2) {
-        override fun entryRemoved(evicted: Boolean, key: String?, oldValue: LlmInference?, newValue: LlmInference?) {
+    /**
+     * Wraps the engine alongside the backend label that actually succeeded at
+     * `initialize()` time. When AUTO falls back from GPU to CPU we want
+     * `/health` to surface what each engine *really* ended up on.
+     */
+    private data class CachedEngine(val engine: Engine, val backend: String)
+
+    private val engines = object : LruCache<String, CachedEngine>(2) {
+        override fun entryRemoved(evicted: Boolean, key: String?, oldValue: CachedEngine?, newValue: CachedEngine?) {
             if (evicted) {
-                // Close sessions tied to this engine BEFORE closing the engine —
-                // a session referencing a closed engine is undefined behavior.
+                // Close conversations tied to this engine BEFORE closing the engine —
+                // a conversation referencing a closed engine is undefined behavior.
                 if (key != null) {
                     val tied = sessions.snapshot().filter { it.value.engineKey == key }.keys
                     tied.forEach { sessions.remove(it) }
                 }
                 try {
-                    oldValue?.close()
+                    oldValue?.engine?.close()
                     LogManager.i("LLMServerService", "Evicted engine: $key")
                 } catch (e: Exception) {
                     LogManager.e("LLMServerService", "Error closing evicted engine", e)
@@ -99,15 +113,15 @@ class LLMServerService : Service() {
     }
 
     /**
-     * Cached `LlmInferenceSession`s keyed by `session_id + engineKey`. Sessions
+     * Cached `Conversation`s keyed by `session_id + engineKey`. Conversations
      * preserve the KV cache across turns: on a follow-up request we only need
-     * to `addQueryChunk` the NEW user turns. Saves the cost of re-tokenizing
-     * and re-prefilling the full conversation each time.
+     * to send the NEW user turns. Saves the cost of re-tokenizing and
+     * re-prefilling the full conversation each time.
      *
-     * Bounded at 4 cached sessions — beyond that the LRU evicts oldest.
+     * Bounded at 4 cached conversations — beyond that the LRU evicts oldest.
      */
     private data class CachedSession(
-        val session: LlmInferenceSession,
+        val conversation: Conversation,
         val engineKey: String,
         val temperature: Float,
         val topK: Int,
@@ -118,22 +132,22 @@ class LLMServerService : Service() {
 
     private val sessions = object : LruCache<String, CachedSession>(4) {
         override fun entryRemoved(evicted: Boolean, key: String?, oldValue: CachedSession?, newValue: CachedSession?) {
-            // Always close the session — both eviction and explicit removal go
+            // Always close the conversation — both eviction and explicit removal go
             // through here. Compare by identity so a put() that replaces the
-            // entry with the SAME session doesn't accidentally close it.
-            if (oldValue != null && oldValue.session !== newValue?.session) {
-                try { oldValue.session.close() } catch (_: Exception) {}
+            // entry with the SAME conversation doesn't accidentally close it.
+            if (oldValue != null && oldValue.conversation !== newValue?.conversation) {
+                try { oldValue.conversation.close() } catch (_: Exception) {}
             }
         }
     }
 
     /**
      * What [resolveSession] returns. Carries enough state for the caller to
-     * either commit (on success) or invalidate (on failure) the session.
+     * either commit (on success) or invalidate (on failure) the conversation.
      */
     private data class ResolvedSession(
-        val session: LlmInferenceSession,
-        val prompt: String,
+        val conversation: Conversation,
+        val prompt: String,           // text to send via sendMessageAsync
         val cacheKey: String?,        // null for stateless (no session_id)
         val engineKey: String,
         val temperature: Float,
@@ -165,7 +179,7 @@ class LLMServerService : Service() {
     }
 
     private fun getModelFile(modelId: String): File {
-        val filename = if (modelId.endsWith(".task")) modelId else "$modelId.task"
+        val filename = if (modelId.endsWith(".litertlm")) modelId else "$modelId.litertlm"
         return File(getExternalFilesDir(null), filename)
     }
 
@@ -258,18 +272,6 @@ class LLMServerService : Service() {
         startForeground(1, notification)
     }
 
-    private fun formatGemmaPrompt(messages: List<Message>): String {
-        val sb = StringBuilder()
-        for (msg in messages) {
-            val role = if (msg.role == "system") "user" else msg.role
-            sb.append("<start_of_turn>$role\n")
-            sb.append(msg.content)
-            sb.append("<end_of_turn>\n")
-        }
-        sb.append("<start_of_turn>model\n")
-        return sb.toString()
-    }
-
     private fun startServer() {
         ServerState.setStatus(ServerState.Status.STARTING)
         ServerState.setError(null)
@@ -299,16 +301,19 @@ class LLMServerService : Service() {
                             "service" to "localllm-android",
                             "version" to "1.0",
                             "queue_depth" to RequestTracker.queue.value.size,
-                            "engines_loaded" to engines.size()
+                            "engines_loaded" to engines.size(),
+                            "engines" to engines.snapshot().map { (key, v) ->
+                                mapOf("key" to key, "backend" to v.backend)
+                            }
                         ))
                     }
 
                     get("/v1/models") {
                         if (!authorize(call)) return@get
                         val dir = getExternalFilesDir(null)
-                        val files = dir?.listFiles { file -> file.name.endsWith(".task") } ?: emptyArray()
+                        val files = dir?.listFiles { file -> file.name.endsWith(".litertlm") } ?: emptyArray()
                         val models = files.map { file ->
-                            val modelId = file.name.removeSuffix(".task")
+                            val modelId = file.name.removeSuffix(".litertlm")
                             ModelData(id = modelId, created = file.lastModified() / 1000)
                         }
                         call.respond(ModelListResponse(data = models))
@@ -396,8 +401,9 @@ class LLMServerService : Service() {
                         // (or invalidated) once inference resolves either way.
                         var resolved: ResolvedSession? = null
                         var inferenceOk = false
+                        var streamWriter: io.ktor.utils.io.ByteWriteChannel? = null
                         try {
-                            LogManager.i("LLMServerService", "Request #${entry.id} from $remoteIp [$ua]: model=${req.model}, stream=${req.stream}, msgs=${req.messages.size}, chars=$promptChars, session=${req.sessionId.ifEmpty { "(stateless)" }}")
+                            LogManager.i("LLMServerService", "Request #${entry.id} from $remoteIp [$ua]: model=${req.model}, stream=${req.stream}, msgs=${req.messages.size}, chars=$promptChars, session=${req.sessionId?.ifEmpty { null } ?: "(stateless)"}")
 
                             val handle = getOrCreateEngine(req)
                             val temp = req.temperature ?: Settings.temperature(this@LLMServerService)
@@ -410,12 +416,13 @@ class LLMServerService : Service() {
                             if (req.stream) {
                                 call.response.cacheControl(CacheControl.NoCache(null))
                                 call.respondBytesWriter(contentType = ContentType.Text.EventStream) {
+                                    streamWriter = this@respondBytesWriter
                                     withTimeout(timeoutMs) {
                                         inferenceMutex.withLock {
                                             RequestTracker.markStarted(entry.id)
                                             withWakeLock(needWakeLock, timeoutMs) {
                                                 runInferenceStreaming(
-                                                    session = resolvedLocal.session,
+                                                    conversation = resolvedLocal.conversation,
                                                     prompt = resolvedLocal.prompt,
                                                     writer = this@respondBytesWriter,
                                                     responseId = responseId,
@@ -432,7 +439,7 @@ class LLMServerService : Service() {
                                         RequestTracker.markStarted(entry.id)
                                         withWakeLock(needWakeLock, timeoutMs) {
                                             withContext(Dispatchers.Default) {
-                                                runInferenceBlocking(resolvedLocal.session, resolvedLocal.prompt)
+                                                runInferenceBlocking(resolvedLocal.conversation, resolvedLocal.prompt)
                                             }
                                         }
                                     }
@@ -459,29 +466,43 @@ class LLMServerService : Service() {
                             lastActivityAt.set(System.currentTimeMillis())
                         } catch (te: TimeoutCancellationException) {
                             LogManager.e("LLMServerService", "Request #${entry.id} timed out after ${timeoutMs} ms")
+                            // Tell the native engine to stop, otherwise generation
+                            // keeps burning compute after the HTTP request is dead.
+                            try { resolved?.conversation?.cancelProcess() } catch (_: Exception) {}
                             RequestTracker.markCompleted(entry.id, error = "timeout after ${timeoutMs} ms")
-                            try {
-                                call.respond(
-                                    HttpStatusCode.RequestTimeout,
-                                    ErrorResponse(ErrorDetails("Inference timeout", "timeout", 408))
-                                )
-                            } catch (_: Exception) { /* stream already started */ }
+                            val w = streamWriter
+                            if (w != null) {
+                                writeSseError(w, "Inference timeout", "timeout", 408)
+                            } else {
+                                try {
+                                    call.respond(
+                                        HttpStatusCode.RequestTimeout,
+                                        ErrorResponse(ErrorDetails("Inference timeout", "timeout", 408))
+                                    )
+                                } catch (_: Exception) { /* stream already started */ }
+                            }
                         } catch (ce: kotlinx.coroutines.CancellationException) {
+                            try { resolved?.conversation?.cancelProcess() } catch (_: Exception) {}
                             RequestTracker.markCompleted(entry.id, cancelled = true)
                             throw ce
                         } catch (e: Exception) {
                             LogManager.e("LLMServerService", "Request #${entry.id} error", e)
                             RequestTracker.markCompleted(entry.id, error = e.message ?: e.javaClass.simpleName)
-                            try {
-                                call.respond(
-                                    HttpStatusCode.InternalServerError,
-                                    ErrorResponse(ErrorDetails(
-                                        message = e.message ?: "Unknown error",
-                                        type = "server_error",
-                                        code = 500
-                                    ))
-                                )
-                            } catch (_: Exception) { /* stream already started */ }
+                            val w = streamWriter
+                            if (w != null) {
+                                writeSseError(w, e.message ?: "Unknown error", "server_error", 500)
+                            } else {
+                                try {
+                                    call.respond(
+                                        HttpStatusCode.InternalServerError,
+                                        ErrorResponse(ErrorDetails(
+                                            message = e.message ?: "Unknown error",
+                                            type = "server_error",
+                                            code = 500
+                                        ))
+                                    )
+                                } catch (_: Exception) { /* stream already started */ }
+                            }
                         } finally {
                             val r = resolved
                             if (r != null) {
@@ -489,7 +510,7 @@ class LLMServerService : Service() {
                                     if (inferenceOk) commitSession(r, req.messages)
                                     else invalidateSession(r)
                                 } else {
-                                    // Stateless: close the one-shot session regardless of outcome.
+                                    // Stateless: close the one-shot conversation regardless of outcome.
                                     closeIfStateless(r)
                                 }
                             }
@@ -532,17 +553,38 @@ class LLMServerService : Service() {
     }
 
     /**
-     * Streaming inference using a pre-built [session]. The session's lifecycle
-     * is owned by the caller — this function never closes it.
+     * Pulls the plain-text content out of a LiteRT-LM [LlmMessage]. Multimodal
+     * outputs (images / audio) are ignored — we only render text chunks back
+     * to the OpenAI-compatible client.
+     */
+    private fun messageText(msg: LlmMessage): String {
+        val parts = msg.contents.contents
+        if (parts.isEmpty()) return ""
+        val sb = StringBuilder()
+        for (p in parts) {
+            if (p is Content.Text) sb.append(p.text)
+        }
+        return sb.toString()
+    }
+
+    /**
+     * Streaming inference using a pre-built [conversation]. The conversation's
+     * lifecycle is owned by the caller — this function never closes it.
      *
      * Writes OpenAI-style SSE chunks to [writer], notifies [onChunk] for stats,
      * and emits a heartbeat comment every 10s so long TTFTs aren't killed by
      * intermediaries or idle-connection detectors.
      *
+     * Each [LlmMessage] emitted by LiteRT-LM is treated as a cumulative snapshot
+     * of the generation so far; we diff against the previous snapshot to extract
+     * the delta. If we instead receive deltas (some LiteRT-LM build configs do
+     * that), the diff logic still produces the right result because the previous
+     * snapshot never becomes a prefix of an unrelated string.
+     *
      * Caller is expected to hold [inferenceMutex].
      */
     private suspend fun runInferenceStreaming(
-        session: LlmInferenceSession,
+        conversation: Conversation,
         prompt: String,
         writer: ByteWriteChannel,
         responseId: String,
@@ -566,15 +608,6 @@ class LLMServerService : Service() {
         }
 
         try {
-            session.addQueryChunk(prompt)
-            val flow = callbackFlow<Pair<String, Boolean>> {
-                session.generateResponseAsync { partialResult, done ->
-                    trySend(Pair(partialResult, done))
-                    if (done) close()
-                }
-                awaitClose { /* No-op; cancellation is best-effort */ }
-            }
-
             val initResp = StreamResponse(
                 id = responseId,
                 `object` = "chat.completion.chunk",
@@ -584,20 +617,34 @@ class LLMServerService : Service() {
             )
             safeWrite("data: ${gson.toJson(initResp)}\n\n")
 
-            flow.collect { (chunk, done) ->
-                if (chunk.isNotEmpty()) {
-                    onChunk(chunk)
+            var prev = ""
+            conversation.sendMessageAsync(Contents.of(prompt)).collect { msg ->
+                val full = messageText(msg)
+                val delta = if (full.startsWith(prev) && full.length > prev.length) full.substring(prev.length)
+                            else if (full == prev) ""
+                            else full   // not a prefix → treat as delta-mode emission
+                if (delta.isNotEmpty()) {
+                    prev = if (full.startsWith(prev)) full else prev + delta
+                    onChunk(delta)
                     val chunkResp = StreamResponse(
                         id = responseId,
                         `object` = "chat.completion.chunk",
                         created = System.currentTimeMillis() / 1000,
                         model = modelName,
-                        choices = listOf(StreamChoice(0, StreamDelta(content = chunk), if (done) "stop" else null))
+                        choices = listOf(StreamChoice(0, StreamDelta(content = delta), null))
                     )
                     safeWrite("data: ${gson.toJson(chunkResp)}\n\n")
                 }
             }
 
+            val finalResp = StreamResponse(
+                id = responseId,
+                `object` = "chat.completion.chunk",
+                created = System.currentTimeMillis() / 1000,
+                model = modelName,
+                choices = listOf(StreamChoice(0, StreamDelta(), "stop"))
+            )
+            safeWrite("data: ${gson.toJson(finalResp)}\n\n")
             safeWrite("data: [DONE]\n\n")
         } finally {
             heartbeat.cancel()
@@ -605,12 +652,33 @@ class LLMServerService : Service() {
     }
 
     /**
-     * Non-streaming inference. Like [runInferenceStreaming], the session is
+     * Non-streaming inference. Like [runInferenceStreaming], the conversation is
      * caller-owned. Caller is expected to hold [inferenceMutex].
      */
-    private fun runInferenceBlocking(session: LlmInferenceSession, prompt: String): String {
-        session.addQueryChunk(prompt)
-        return session.generateResponse()
+    private fun runInferenceBlocking(conversation: Conversation, prompt: String): String {
+        val response = conversation.sendMessage(Contents.of(prompt), emptyMap())
+        return messageText(response)
+    }
+
+    /**
+     * Emit an OpenAI-shaped error as a final SSE chunk followed by the [DONE]
+     * sentinel. Used when an exception fires AFTER the SSE response has already
+     * committed headers — at that point [call.respond] is a no-op, so the only
+     * way to tell the client what went wrong is to write into the open stream.
+     *
+     * Swallows IOException because the client may have already disconnected.
+     */
+    private suspend fun writeSseError(writer: io.ktor.utils.io.ByteWriteChannel, message: String, type: String, code: Int) {
+        try {
+            val json = gson.toJson(ErrorResponse(ErrorDetails(message, type, code)))
+            writer.writeStringUtf8("data: $json\n\n")
+            writer.writeStringUtf8("data: [DONE]\n\n")
+            writer.flush()
+        } catch (_: java.io.IOException) {
+            // Client gone; nothing actionable.
+        } catch (_: Exception) {
+            // Defensive: never let error-reporting itself throw out of a catch arm.
+        }
     }
 
     /**
@@ -649,28 +717,85 @@ class LLMServerService : Service() {
         }
     }
 
-    private fun createSession(engine: LlmInference, temperature: Float, topK: Int): LlmInferenceSession {
-        val options = LlmInferenceSession.LlmInferenceSessionOptions.builder()
-            .setTemperature(temperature)
-            .setTopK(topK)
-            .build()
-        return LlmInferenceSession.createFromOptions(engine, options)
+    /**
+     * Build a fresh [Conversation] pre-loaded with the OpenAI-style chat history
+     * minus the final user turn (which the caller will send via sendMessage).
+     * System messages are collapsed into [ConversationConfig.systemInstruction];
+     * the rest become [ConversationConfig.initialMessages] so they prefill the
+     * KV cache without triggering generation.
+     */
+    private fun createConversation(
+        engine: Engine,
+        temperature: Float,
+        topK: Int,
+        systemText: String?,
+        initial: List<Message>
+    ): Conversation {
+        val systemInstruction = systemText?.takeIf { it.isNotBlank() }?.let { Contents.of(it) }
+        val priorMessages = initial.map { m ->
+            when (m.role) {
+                "assistant" -> LlmMessage.Companion.model(Contents.of(m.content), emptyList(), emptyMap())
+                "system"    -> LlmMessage.Companion.system(m.content)
+                else        -> LlmMessage.Companion.user(m.content)
+            }
+        }
+        val cfg = ConversationConfig(
+            systemInstruction,
+            priorMessages,
+            emptyList(),                                       // tools
+            SamplerConfig(topK, /*topP=*/0.95, temperature.toDouble(), /*seed=*/0)
+        )
+        return engine.createConversation(cfg)
     }
 
-    private data class EngineHandle(val engine: LlmInference, val cacheKey: String)
+    private data class EngineHandle(val engine: Engine, val cacheKey: String)
+
+    /**
+     * Map an explicit user backend choice (CPU / GPU) to a [Backend] instance.
+     * NOT used for AUTO — that path is resolved in [getOrCreateEngine] with a
+     * try/fallback so it can actually probe what works on this device.
+     */
+    private fun resolveBackend(choice: String): Backend = when (choice) {
+        Settings.BACKEND_GPU -> Backend.GPU()
+        else                 -> Backend.CPU()
+    }
+
+    /**
+     * Construct + initialize a fresh engine on the given backend. Throws on
+     * any failure (lib-missing, OOM, op unsupported, model corrupt, …). Kept
+     * as a small seam so the AUTO fallback path can call this twice without
+     * duplicating the EngineConfig wiring.
+     */
+    private fun buildEngine(modelFile: File, maxTokens: Int?, backend: Backend): Engine {
+        val cfg = EngineConfig(
+            modelFile.absolutePath,
+            backend,
+            /*visionBackend=*/null,
+            /*audioBackend=*/null,
+            /*maxNumTokens=*/maxTokens,
+            /*maxNumImages=*/null,
+            /*cacheDir=*/null
+        )
+        return Engine(cfg).also { it.initialize() }
+    }
 
     /**
      * Engine cache lookup. Builds a new engine when this exact
-     * (model, maxTokens, backend) combination isn't cached. Returns both the
-     * engine and its cache key so callers (notably session resolution) can
-     * tag downstream resources with the right parent.
+     * (model, maxTokens, backend) combination isn't cached. AUTO is meaningful
+     * here: try GPU, on failure log + fall back to CPU. Explicit CPU / GPU
+     * choices are strict (no fallback) so the user can actually debug them.
      */
     private fun getOrCreateEngine(req: ChatRequest): EngineHandle {
-        val maxTokens = req.maxTokens ?: Settings.maxTokens(this)
+        // Only honor a per-request maxTokens cap when the client explicitly
+        // sent one. Otherwise pass null so LiteRT-LM uses the budget that the
+        // model file was compiled with — overriding it with our generic
+        // Settings.maxTokens (default 1024) is what produces the
+        // DYNAMIC_UPDATE_SLICE shape mismatch on big-context Gemma 4 weights.
+        val maxTokens: Int? = req.maxTokens
         val backendChoice = Settings.backend(this)
-        val cacheKey = "${req.model}_${maxTokens}_${backendChoice}"
+        val cacheKey = "${req.model}_${maxTokens ?: "model"}_${backendChoice}"
 
-        engines.get(cacheKey)?.let { return EngineHandle(it, cacheKey) }
+        engines.get(cacheKey)?.let { return EngineHandle(it.engine, cacheKey) }
 
         val modelFile = getModelFile(req.model)
         if (!modelFile.exists()) {
@@ -678,32 +803,27 @@ class LLMServerService : Service() {
         }
 
         LogManager.i("LLMServerService", "Loading engine for $cacheKey")
-        val builder = LlmInference.LlmInferenceOptions.builder()
-            .setModelPath(modelFile.absolutePath)
-            .setMaxTokens(maxTokens)
-
-        // Apply backend preference. AUTO == DEFAULT — let MediaPipe pick the best
-        // available backend for this device, which on Pixel 10 / Tensor G5 means
-        // the NPU is used when the model is NPU-compatible.
-        val backendEnum = when (backendChoice) {
-            Settings.BACKEND_CPU -> LlmInference.Backend.CPU
-            Settings.BACKEND_GPU -> LlmInference.Backend.GPU
-            else -> LlmInference.Backend.DEFAULT
-        }
-        builder.setPreferredBackend(backendEnum)
-
-        val engine = try {
-            LlmInference.createFromOptions(this, builder.build())
-        } catch (e: Exception) {
-            val msg = e.message ?: ""
-            if (msg.contains("zip", ignoreCase = true)) {
-                throw IllegalStateException("Failed to initialize engine: Model file is not a valid zip archive. It might be corrupted or in an unsupported format. Try re-downloading.", e)
+        val (engine, actualBackend) = try {
+            when (backendChoice) {
+                Settings.BACKEND_AUTO -> {
+                    // Prefer GPU; fall back to CPU if init throws (libvndksupport
+                    // missing, OpenCL driver missing, op unsupported, …).
+                    try {
+                        buildEngine(modelFile, maxTokens, Backend.GPU()) to "GPU"
+                    } catch (e: Exception) {
+                        LogManager.w("LLMServerService", "GPU init failed for $cacheKey, falling back to CPU: ${e.message}")
+                        buildEngine(modelFile, maxTokens, Backend.CPU()) to "CPU"
+                    }
+                }
+                Settings.BACKEND_GPU -> buildEngine(modelFile, maxTokens, Backend.GPU()) to "GPU"
+                else                 -> buildEngine(modelFile, maxTokens, Backend.CPU()) to "CPU"
             }
-            throw IllegalStateException("Failed to initialize engine: $msg", e)
+        } catch (e: Exception) {
+            throw IllegalStateException("Failed to initialize engine: ${e.message ?: e.javaClass.simpleName}", e)
         }
 
         try {
-            engines.put(cacheKey, engine)
+            engines.put(cacheKey, CachedEngine(engine, actualBackend))
         } catch (e: Exception) {
             try { engine.close() } catch (_: Exception) {}
             throw e
@@ -714,7 +834,7 @@ class LLMServerService : Service() {
     /**
      * Stable hash of `messages[0 until count]`. Used to validate that a client
      * isn't lying about conversation continuity: if their replayed prefix
-     * doesn't match what we recorded, we reset the cached session.
+     * doesn't match what we recorded, we reset the cached conversation.
      */
     private fun messagesPrefixHash(messages: List<Message>, count: Int): Long {
         var h = 1L
@@ -728,19 +848,21 @@ class LLMServerService : Service() {
     }
 
     /**
-     * Decide whether to reuse a cached session or build a fresh one, and
-     * compute the prompt fragment to `addQueryChunk` accordingly.
+     * Decide whether to reuse a cached conversation or build a fresh one, and
+     * compute the prompt fragment to send accordingly.
      *
-     * Stateless (empty `session_id`): always a fresh session, full prompt,
-     * caller must close on exit.
+     * Stateless (empty `session_id`): always a fresh conversation prefilled
+     * with all-but-the-last message; caller sends the last user turn and must
+     * close on exit.
      *
      * Sessioned: look up the cache. Reuse only when
-     *   - sampling params match (different temperature/top_k → different session)
+     *   - sampling params match (different temperature/top_k → different conversation)
      *   - the cached prefix hash matches what the client just replayed
-     *   - `messages.size >= cached.seenCount`
-     * On reuse we addQueryChunk only the NEW user/system turns; assistant
-     * turns in the new range are already in the model's KV cache from the
-     * previous generation and would corrupt the conversation if re-fed.
+     *   - `messages.size > cached.seenCount`
+     *   - the new range collapses to exactly one user turn after filtering out
+     *     assistant turns (which are already in the KV cache) and system turns
+     *     (which can't be retroactively re-bound)
+     * Otherwise we rebuild from scratch.
      */
     private fun resolveSession(
         req: ChatRequest,
@@ -748,12 +870,20 @@ class LLMServerService : Service() {
         temperature: Float,
         topK: Int
     ): ResolvedSession {
+        val systemText = req.messages.firstOrNull { it.role == "system" }?.content
+        val nonSystem = req.messages.filter { it.role != "system" }
+        if (nonSystem.isEmpty() || nonSystem.last().role != "user") {
+            throw IllegalArgumentException("Last message must have role=user")
+        }
+        val lastUserPrompt = nonSystem.last().content
+        val prior = nonSystem.dropLast(1)
+
         // Stateless path.
-        if (req.sessionId.isEmpty()) {
-            val session = createSession(handle.engine, temperature, topK)
+        if (req.sessionId.isNullOrEmpty()) {
+            val conversation = createConversation(handle.engine, temperature, topK, systemText, prior)
             return ResolvedSession(
-                session = session,
-                prompt = formatGemmaPrompt(req.messages),
+                conversation = conversation,
+                prompt = lastUserPrompt,
                 cacheKey = null,
                 engineKey = handle.cacheKey,
                 temperature = temperature,
@@ -767,37 +897,40 @@ class LLMServerService : Service() {
         val canReuse = cached != null &&
             cached.temperature == temperature &&
             cached.topK == topK &&
-            cached.seenCount <= req.messages.size &&
-            cached.prefixHash == messagesPrefixHash(req.messages, cached.seenCount)
+            cached.seenCount < req.messages.size &&
+            cached.prefixHash == messagesPrefixHash(req.messages, cached.seenCount) &&
+            run {
+                // The "new range" since the cached conversation last saw the client.
+                // Reuse is only safe when this contains exactly one user turn
+                // (the rest must be assistant turns already replayed back by the
+                // server, which the engine already has in its KV cache).
+                val newRange = req.messages.subList(cached.seenCount, req.messages.size)
+                val nonAssistant = newRange.filter { it.role != "assistant" }
+                nonAssistant.size == 1 && nonAssistant[0].role == "user"
+            }
 
         if (canReuse) {
             cached!!
-            val newRange = req.messages.subList(cached.seenCount, req.messages.size)
-            // Skip assistant turns in the new range — those are server-generated
-            // and already in the KV cache. Only feed user / system turns.
-            val toAdd = newRange.filter { it.role != "assistant" }
-            if (toAdd.isNotEmpty()) {
-                LogManager.i("LLMServerService", "Session $cacheKey reused (added ${toAdd.size} of ${newRange.size} new turns)")
-                return ResolvedSession(
-                    session = cached.session,
-                    prompt = formatGemmaPrompt(toAdd),
-                    cacheKey = cacheKey,
-                    engineKey = handle.cacheKey,
-                    temperature = temperature,
-                    topK = topK
-                )
-            }
-            // Empty after filtering: client only added assistant turns. Treat as
-            // a regeneration request — rebuild to be safe rather than try to
-            // re-prompt an in-progress conversation.
-            sessions.remove(cacheKey)
+            val newUser = req.messages.subList(cached.seenCount, req.messages.size)
+                .first { it.role != "assistant" }
+            LogManager.i("LLMServerService", "Session $cacheKey reused (sending 1 new user turn)")
+            return ResolvedSession(
+                conversation = cached.conversation,
+                prompt = newUser.content,
+                cacheKey = cacheKey,
+                engineKey = handle.cacheKey,
+                temperature = temperature,
+                topK = topK
+            )
         }
 
-        // Rebuild path.
-        val session = createSession(handle.engine, temperature, topK)
+        // Rebuild path — either no cache, sampling params changed, prefix
+        // mismatched, or the client added something we can't merge in-place.
+        if (cached != null) sessions.remove(cacheKey)
+        val conversation = createConversation(handle.engine, temperature, topK, systemText, prior)
         return ResolvedSession(
-            session = session,
-            prompt = formatGemmaPrompt(req.messages),
+            conversation = conversation,
+            prompt = lastUserPrompt,
             cacheKey = cacheKey,
             engineKey = handle.cacheKey,
             temperature = temperature,
@@ -806,14 +939,14 @@ class LLMServerService : Service() {
     }
 
     /**
-     * Call on successful generation. Stores or updates the session in cache so
+     * Call on successful generation. Stores or updates the conversation in cache so
      * the next request for this session_id can pick up where we left off.
-     * No-op for stateless sessions — caller must close those explicitly.
+     * No-op for stateless conversations — caller must close those explicitly.
      */
     private fun commitSession(resolved: ResolvedSession, messages: List<Message>) {
         val cacheKey = resolved.cacheKey ?: return
         sessions.put(cacheKey, CachedSession(
-            session = resolved.session,
+            conversation = resolved.conversation,
             engineKey = resolved.engineKey,
             temperature = resolved.temperature,
             topK = resolved.topK,
@@ -824,22 +957,22 @@ class LLMServerService : Service() {
     }
 
     /**
-     * Call on failure to drop a (possibly half-initialized) session from cache.
-     * Closes the session as a side effect.
+     * Call on failure to drop a (possibly half-initialized) conversation from cache.
+     * Closes the conversation as a side effect.
      */
     private fun invalidateSession(resolved: ResolvedSession) {
         val cacheKey = resolved.cacheKey
         if (cacheKey != null) {
             sessions.remove(cacheKey)
         } else {
-            try { resolved.session.close() } catch (_: Exception) {}
+            try { resolved.conversation.close() } catch (_: Exception) {}
         }
     }
 
     /** Stateless cleanup helper. */
     private fun closeIfStateless(resolved: ResolvedSession) {
         if (!resolved.isCached) {
-            try { resolved.session.close() } catch (_: Exception) {}
+            try { resolved.conversation.close() } catch (_: Exception) {}
         }
     }
 
@@ -855,7 +988,7 @@ class LLMServerService : Service() {
         } catch (e: Exception) {
             LogManager.e("LLMServerService", "Error stopping server", e)
         }
-        // Close sessions before engines — sessions reference engines and must
+        // Close conversations before engines — conversations reference engines and must
         // not outlive them.
         sessions.evictAll()
         engines.evictAll()
