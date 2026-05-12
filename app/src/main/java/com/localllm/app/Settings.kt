@@ -39,8 +39,12 @@ object Settings {
     const val KEY_IDLE_EVICT_MS = "idle_evict_ms"
     const val KEY_IDLE_STOP_MS = "idle_stop_ms"
 
-    // Inference backend: "AUTO" lets MediaPipe pick (on Pixel 10 with a compatible
-    // model this routes to the Tensor G5 NPU). "CPU" and "GPU" force a backend.
+    // Inference backend: "AUTO" tries GPU first and transparently falls back to
+    // CPU when GPU init fails (see LLMServerService.getOrCreateEngine). "CPU" and
+    // "GPU" force a backend strictly with no fallback so init errors surface to
+    // the user. NPU acceleration requires a Qualcomm device plus a
+    // `_qualcomm_*.litertlm` model variant — it is not engaged by AUTO on a
+    // generic Pixel-class device.
     const val KEY_BACKEND = "backend"
     const val BACKEND_AUTO = "AUTO"
     const val BACKEND_CPU = "CPU"

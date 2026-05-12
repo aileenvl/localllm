@@ -24,13 +24,39 @@
     <string name="models_download">Download</string>
     <string name="models_delete">Delete</string>
     <string name="models_downloading">Downloading: %1$d%%</string>
+    <string name="models_cancel">Cancel download</string>
+    <string name="models_progress_sizes">%1$s / %2$s</string>
+    <string name="models_progress_percent">%1$d%%</string>
+    <string name="models_sha_verified">SHA-256 verified</string>
+    <string name="models_sha_unverified">Unverified</string>
+    <string name="models_metadata_line">%1$s · last used %2$s</string>
+    <string name="models_empty_title">Get started</string>
+    <string name="models_empty_body">Pick a model below to download. Gemma 4 E2B is the fastest option on this device.</string>
 
     <!-- Chat tab -->
     <string name="chat_needs_model">Download or import a model first.</string>
     <string name="chat_active_model">Active Model</string>
     <string name="chat_placeholder">Ask something…</string>
     <string name="chat_send">Send</string>
+    <string name="chat_stop">Stop</string>
     <string name="chat_empty">Send a message to test the local server.</string>
+    <string name="chat_empty_title">Try Gemma 4</string>
+    <string name="chat_empty_body">On-device chat, served via the local HTTP API on this phone.</string>
+    <string name="chat_role_user">USER</string>
+    <string name="chat_role_assistant">ASSISTANT</string>
+    <string name="chat_show_system_prompt">Show system prompt</string>
+    <string name="chat_hide_system_prompt">Hide system prompt</string>
+    <string name="chat_system_prompt_label">System prompt</string>
+    <string name="chat_system_prompt_placeholder">You are a helpful assistant…</string>
+    <string name="chat_copy_message">Long-press to copy %1$s message</string>
+    <string name="chat_copied">Copied</string>
+    <string name="chat_code_copy">Copy code</string>
+    <string name="chat_code_copied">Code copied</string>
+    <string name="chat_link_copied">Link copied</string>
+    <string name="chat_sample_haiku">Write a haiku about Pixel 6.</string>
+    <string name="chat_sample_cancel">Explain `Conversation.cancelProcess()` in two sentences.</string>
+    <string name="chat_sample_curl">Generate a curl command to call the local /v1/chat/completions endpoint.</string>
+    <string name="chat_sample_debug">Outline a 5-step plan to debug a flaky Android Compose test.</string>
 
     <!-- Dashboard tab -->
     <string name="dash_live">Live</string>
@@ -52,15 +78,41 @@
     <string name="dash_state_err">ERR</string>
     <string name="dash_state_cxl">CXL</string>
 
+    <!-- Dashboard tab — stat cards & sparkline -->
+    <string name="dash_stat_total_caption">today</string>
+    <string name="dash_stat_latency_caption">p50 over last 50 reqs</string>
+    <string name="dash_stat_tokens_caption">avg tokens / second</string>
+    <string name="dash_stat_err_rate_caption">errors / total</string>
+    <string name="dash_throughput_title">Throughput</string>
+    <string name="dash_throughput_empty">No requests yet. Hit the API or use the Chat tab to populate this chart.</string>
+    <string name="dash_running_label">running %1$s</string>
+    <string name="dash_idle_status">Idle</string>
+    <string name="dash_history_time_only">%1$s</string>
+
+    <!-- Console tab -->
+    <string name="console_search_placeholder">Search logs</string>
+    <string name="console_filter_more">More…</string>
+    <string name="console_autoscroll">Auto-scroll</string>
+    <string name="console_empty_filtered">No matching log entries</string>
+    <string name="console_clear_filters">Clear filters</string>
+    <string name="console_copied">Copied</string>
+    <string name="console_level_debug">DEBUG</string>
+    <string name="console_level_info">INFO</string>
+    <string name="console_level_warn">WARN</string>
+    <string name="console_level_error">ERROR</string>
+
     <!-- Settings tab — sections -->
     <string name="settings_section_server">Server</string>
     <string name="settings_section_network">Network</string>
-    <string name="settings_section_inference">Inference defaults</string>
+    <string name="settings_section_inference">Inference</string>
     <string name="settings_section_startup">Startup</string>
-    <string name="settings_section_limits">Request limits</string>
-    <string name="settings_section_background">Background</string>
+    <string name="settings_section_limits">Limits</string>
+    <string name="settings_section_background">Background efficiency</string>
     <string name="settings_section_security">Security</string>
     <string name="settings_section_custom_urls">Custom model URLs</string>
+    <string name="settings_expand">Expand section</string>
+    <string name="settings_collapse">Collapse section</string>
+    <string name="settings_help">Show help</string>
 
     <!-- Settings tab — server controls -->
     <string name="settings_start">Start</string>
@@ -70,6 +122,8 @@
 
     <!-- Settings tab — network -->
     <string name="settings_port">Port</string>
+    <string name="settings_port_help">TCP port the server binds to. 1024–65535. Restart required after change.</string>
+    <string name="settings_port_in_use">Port %1$d appears to be in use.</string>
     <string name="settings_bind_lan">Bind to LAN (0.0.0.0)</string>
     <string name="settings_bind_lan_subtitle">Off: localhost only. On: reachable from other devices on Wi-Fi.</string>
     <string name="settings_cors">Enable CORS</string>
@@ -78,13 +132,22 @@
     <!-- Settings tab — inference defaults -->
     <string name="settings_inference_hint">Used when the request doesn\'t specify temperature, top_k, or max_tokens.</string>
     <string name="settings_backend">Backend</string>
-    <string name="settings_backend_hint">Auto lets MediaPipe pick the best backend. On Pixel 10 / Tensor G5 that routes to the NPU when the model supports it. Changing the backend rebuilds the engine on the next request.</string>
+    <string name="settings_backend_hint">Changing the backend rebuilds the engine on the next request.</string>
     <string name="settings_backend_auto">Auto</string>
     <string name="settings_backend_cpu">CPU</string>
     <string name="settings_backend_gpu">GPU</string>
+    <string name="settings_backend_desc_auto"><![CDATA[<b>Auto</b> <i>(recommended)</i> — tries GPU first, falls back to CPU if the device\'s GPU delegate can\'t initialize. On most Pixel devices the GPU delegate fails (missing system library) and AUTO transparently uses CPU. Check <tt>GET /health</tt> to see the chosen backend per cached engine.]]></string>
+    <string name="settings_backend_desc_cpu"><![CDATA[<b>CPU</b> — force <tt>Backend.CPU</tt>. Always works. ~6–12 tok/s on Pixel-class hardware for Gemma 4 E2B.]]></string>
+    <string name="settings_backend_desc_gpu"><![CDATA[<b>GPU</b> — force <tt>Backend.GPU</tt>. Strict — no fallback. Will fail at request time on devices missing <tt>libvndksupport.so</tt> (most stock Pixel images).]]></string>
+    <string name="settings_chipset_tensor">Your device: %1$s (Tensor). GPU delegate often fails; AUTO will fall back to CPU.</string>
+    <string name="settings_chipset_snapdragon">Your device: %1$s (Snapdragon). NPU variant <tt>.litertlm</tt> files in the catalog should work — try them with backend AUTO.</string>
+    <string name="settings_chipset_other">Your device: %1$s. AUTO is the safe choice.</string>
     <string name="settings_max_tokens">Max tokens</string>
+    <string name="settings_max_tokens_help">Default cap on response length when the request omits max_tokens. Larger values use more memory and time.</string>
     <string name="settings_temperature">Temperature: %1$s</string>
+    <string name="settings_temperature_help">Sampling temperature. 0 = deterministic / greedy. Higher values increase diversity.</string>
     <string name="settings_top_k">Top-K: %1$d</string>
+    <string name="settings_top_k_help">Restrict sampling to the top-K most likely tokens. Lower = more focused, higher = more varied.</string>
 
     <!-- Settings tab — startup -->
     <string name="settings_boot">Start on device boot</string>
@@ -95,13 +158,18 @@
     <!-- Settings tab — limits -->
     <string name="settings_limits_hint">Backpressure for misbehaving clients. 429 when queue is full, 413 for oversized prompts, 408 on timeout.</string>
     <string name="settings_timeout">Request timeout (seconds)</string>
+    <string name="settings_timeout_help">Max time a single request can run before the server returns 408.</string>
     <string name="settings_queue_depth">Max queue depth</string>
+    <string name="settings_queue_depth_help">How many requests can wait in line while one is running. Excess clients get 429.</string>
     <string name="settings_prompt_chars">Max prompt chars</string>
+    <string name="settings_prompt_chars_help">Character cap on a single prompt body. Oversized prompts get 413.</string>
 
     <!-- Settings tab — background -->
     <string name="settings_background_hint">Release engines and (optionally) stop the service after a quiet period.</string>
     <string name="settings_idle_evict">Unload models after (minutes idle, 0 = never)</string>
+    <string name="settings_idle_evict_help">Frees the engine\'s memory after the cache has been idle this long. Next request reloads.</string>
     <string name="settings_idle_stop">Auto-stop server after (minutes idle, 0 = never)</string>
+    <string name="settings_idle_stop_help">Stops the foreground service entirely after this much idle time.</string>
     <string name="settings_keep_awake">Keep CPU awake during inference</string>
     <string name="settings_keep_awake_subtitle">Holds a partial wake lock while a request is running so the device doesn\'t throttle mid-generation.</string>
 
@@ -114,7 +182,7 @@
 
     <!-- Settings tab — custom URLs -->
     <string name="settings_urls_hint">One URL per line. Must point at a LiteRT-LM .litertlm bundle.</string>
-    <string name="settings_urls_label">URLs</string>
+    <string name="settings_urls_label">Custom model URLs</string>
     <string name="settings_urls_placeholder">https://example.com/my-model.litertlm</string>
 
     <!-- Catalog item placeholder -->

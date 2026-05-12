@@ -83,8 +83,11 @@ class MainActivity : ComponentActivity() {
             val coroutineScope = rememberCoroutineScope()
 
             var existingModels by remember { mutableStateOf(setOf<String>()) }
+            var modelSizes by remember { mutableStateOf(mapOf<String, Long>()) }
+            var modelMtimes by remember { mutableStateOf(mapOf<String, Long>()) }
             val activeDownloads = remember { mutableStateMapOf<String, Long>() }
             val downloadProgress = remember { mutableStateMapOf<String, Float>() }
+            val downloadTotalBytes = remember { mutableStateMapOf<String, Long>() }
             var activeTab by remember { mutableStateOf(AppTab.MODELS) }
             val logs by LogManager.logs.collectAsState(initial = LogEntry(0, "INFO", "Initializing..."))
             val logHistory = remember { mutableStateListOf<LogEntry>() }
@@ -123,11 +126,19 @@ class MainActivity : ComponentActivity() {
             // that display the list. One immediate refresh on tab switch so the
             // user sees fresh data without waiting.
             LaunchedEffect(activeTab) {
-                refreshExistingModels(context) { existingModels = it }
+                refreshExistingModels(context) { names, sizes, mtimes ->
+                    existingModels = names
+                    modelSizes = sizes
+                    modelMtimes = mtimes
+                }
                 if (activeTab == AppTab.MODELS || activeTab == AppTab.CHAT) {
                     while (true) {
                         delay(2_000)
-                        refreshExistingModels(context) { existingModels = it }
+                        refreshExistingModels(context) { names, sizes, mtimes ->
+                            existingModels = names
+                            modelSizes = sizes
+                            modelMtimes = mtimes
+                        }
                     }
                 }
             }
@@ -171,6 +182,7 @@ class MainActivity : ComponentActivity() {
                                 val downloaded = cursor.getLong(downloadedIdx)
                                 val total = cursor.getLong(totalIdx)
                                 if (total > 0) downloadProgress[filename] = downloaded.toFloat() / total
+                                downloadTotalBytes[filename] = total
                             }
                         } else {
                             toRemove.add(filename)
@@ -180,6 +192,7 @@ class MainActivity : ComponentActivity() {
                     toRemove.forEach {
                         activeDownloads.remove(it)
                         downloadProgress.remove(it)
+                        downloadTotalBytes.remove(it)
                     }
                     delay(1_000)
                 }
@@ -305,10 +318,23 @@ class MainActivity : ComponentActivity() {
                                     builtIn = AVAILABLE_MODELS,
                                     customUrls = customUrls,
                                     existingModels = existingModels,
+                                    modelSizes = modelSizes,
+                                    modelMtimes = modelMtimes,
                                     activeDownloads = activeDownloads,
                                     downloadProgress = downloadProgress,
+                                    downloadTotalBytes = downloadTotalBytes,
                                     onDownload = { model ->
                                         activeDownloads[model.filename] = startDownload(context, model)
+                                    },
+                                    onCancel = { model ->
+                                        val id = activeDownloads[model.filename]
+                                        if (id != null) {
+                                            val manager = context.getSystemService(DownloadManager::class.java)
+                                            manager.remove(id)
+                                            activeDownloads.remove(model.filename)
+                                            downloadProgress.remove(model.filename)
+                                            downloadTotalBytes.remove(model.filename)
+                                        }
                                     },
                                     onDelete = { model ->
                                         getModelFile(model.filename).delete()
@@ -440,8 +466,14 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private inline fun refreshExistingModels(context: Context, update: (Set<String>) -> Unit) {
+private inline fun refreshExistingModels(
+    context: Context,
+    update: (Set<String>, Map<String, Long>, Map<String, Long>) -> Unit
+) {
     val dir = context.getExternalFilesDir(null)
     val files = dir?.listFiles { file -> file.name.endsWith(".litertlm") } ?: emptyArray()
-    update(files.map { it.name }.toSet())
+    val names = files.map { it.name }.toSet()
+    val sizes = files.associate { it.name to it.length() }
+    val mtimes = files.associate { it.name to it.lastModified() }
+    update(names, sizes, mtimes)
 }

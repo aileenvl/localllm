@@ -23,8 +23,9 @@ data class ChatRequest(
     /**
      * Opaque conversation ID for KV-cache reuse across turns. When empty
      * (the default) every request runs in a fresh session. When non-empty
-     * the server caches the `LlmInferenceSession` for this ID and only
-     * `addQueryChunk`s the new turns on follow-up requests.
+     * the server caches a LiteRT-LM `Conversation` for this ID and only
+     * feeds the new user turn into it on follow-up requests — the KV cache
+     * for the prior turns is preserved on the engine side.
      */
     @SerializedName("session_id") val sessionId: String? = null,
     val temperature: Float? = null,

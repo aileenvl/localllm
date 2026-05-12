@@ -103,7 +103,11 @@ dependencies {
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
+    implementation(libs.androidx.material.icons.extended)
     implementation(libs.androidx.lifecycle.runtime.compose)
+
+    // Markdown parsing (Java, no Android dependency) for assistant message rendering
+    implementation(libs.commonmark)
 
     // Async, Flow-native settings persistence (replaces SharedPreferences)
     implementation(libs.androidx.datastore.preferences)

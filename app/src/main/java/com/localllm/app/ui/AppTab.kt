@@ -22,4 +22,8 @@ enum class AppTab(@StringRes val labelRes: Int) {
  * UI-side chat message. Kept separate from the server's [com.localllm.app.Message]
  * so the UI layer doesn't take a structural dependency on the API contract.
  */
-data class UiMessage(val role: String, val content: String)
+data class UiMessage(
+    val role: String,
+    val content: String,
+    val timestampMs: Long = System.currentTimeMillis()
+)

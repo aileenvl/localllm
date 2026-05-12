@@ -1,12 +1,9 @@
 package com.localllm.app.ui
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
-import android.widget.Toast
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -20,13 +17,19 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Send
+import androidx.compose.material.icons.outlined.Stop
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -38,7 +41,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -91,7 +94,6 @@ fun ChatTab(
     tokenCount: Int = 0,
     streamElapsedMs: Long = 0L
 ) {
-    val context = LocalContext.current
     Column(modifier = Modifier.fillMaxSize()) {
         if (existingModels.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -149,9 +151,20 @@ fun ChatTab(
             )
         }
 
-        // Collapsible system prompt section.
+        // Collapsible system prompt section, with rotating chevron-ish icon
+        // (we rotate the Tune icon 90° when expanded for a tactile feel).
         var systemPromptVisible by remember { mutableStateOf(false) }
         var systemPrompt by remember { mutableStateOf("") }
+        val rotation by animateFloatAsState(
+            targetValue = if (systemPromptVisible) 90f else 0f,
+            animationSpec = tween(durationMillis = 200),
+            label = "system-prompt-toggle"
+        )
+        val systemToggleLabel = if (systemPromptVisible) {
+            stringResource(R.string.chat_hide_system_prompt)
+        } else {
+            stringResource(R.string.chat_show_system_prompt)
+        }
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
@@ -160,12 +173,17 @@ fun ChatTab(
                 onClick = { systemPromptVisible = !systemPromptVisible },
                 modifier = Modifier
                     .defaultMinSize(minHeight = 48.dp)
-                    .semantics {
-                        contentDescription =
-                            if (systemPromptVisible) "Hide system prompt" else "Show system prompt"
-                    }
+                    .semantics { contentDescription = systemToggleLabel }
             ) {
-                Text(if (systemPromptVisible) "Hide system prompt" else "Show system prompt")
+                Icon(
+                    imageVector = Icons.Outlined.Tune,
+                    contentDescription = null,
+                    modifier = Modifier
+                        .size(18.dp)
+                        .rotate(rotation)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(systemToggleLabel)
             }
         }
         if (systemPromptVisible) {
@@ -175,11 +193,32 @@ fun ChatTab(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 8.dp),
-                label = { Text("System prompt") },
-                placeholder = { Text("You are a helpful assistant…") },
+                label = { Text(stringResource(R.string.chat_system_prompt_label)) },
+                placeholder = { Text(stringResource(R.string.chat_system_prompt_placeholder)) },
                 maxLines = 4
             )
         }
+
+        // Track the size of the last appended chunk on the streaming assistant
+        // message so ChatBubble can fade the trailing delta in. Uses a
+        // SideEffect to mutate after composition completes, avoiding the
+        // "writing state during composition" footgun.
+        val lastAssistantLengthState = remember { androidx.compose.runtime.mutableStateOf(0) }
+        val lastDeltaState = remember { androidx.compose.runtime.mutableStateOf(0) }
+        val streamingAssistantIndex = chatMessages.indexOfLast { it.role == "assistant" }
+        val currentAssistantLength =
+            if (isChatting && streamingAssistantIndex >= 0) chatMessages[streamingAssistantIndex].content.length
+            else 0
+        androidx.compose.runtime.SideEffect {
+            if (isChatting && currentAssistantLength > lastAssistantLengthState.value) {
+                lastDeltaState.value = currentAssistantLength - lastAssistantLengthState.value
+                lastAssistantLengthState.value = currentAssistantLength
+            } else if (!isChatting) {
+                lastAssistantLengthState.value = 0
+                lastDeltaState.value = 0
+            }
+        }
+        val lastDelta = lastDeltaState.value
 
         LazyColumn(
             state = chatListState,
@@ -191,15 +230,16 @@ fun ChatTab(
         ) {
             if (chatMessages.isEmpty()) {
                 item {
-                    Text(
-                        stringResource(R.string.chat_empty),
-                        color = MaterialTheme.colorScheme.secondary,
-                        modifier = Modifier.padding(8.dp)
-                    )
+                    ChatEmptyState(onPromptSelected = onInputChange)
                 }
             }
-            items(chatMessages) { msg ->
-                ChatBubble(msg = msg, context = context)
+            itemsIndexed(chatMessages) { index, msg ->
+                val isStreaming = isChatting && index == streamingAssistantIndex && msg.role == "assistant"
+                ChatBubble(
+                    msg = msg,
+                    isStreaming = isStreaming,
+                    lastDeltaLength = if (isStreaming) lastDelta else 0
+                )
             }
             if (isChatting) {
                 item {
@@ -227,11 +267,21 @@ fun ChatTab(
             if (isChatting) {
                 Button(
                     onClick = onStop,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer
+                    ),
                     modifier = Modifier
                         .heightIn(min = 48.dp)
                         .semantics { contentDescription = "Stop streaming" }
                 ) {
-                    Text("Stop")
+                    Icon(
+                        imageVector = Icons.Outlined.Stop,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(stringResource(R.string.chat_stop))
                 }
             } else {
                 Button(
@@ -241,45 +291,15 @@ fun ChatTab(
                         .heightIn(min = 48.dp)
                         .semantics { contentDescription = "Send message" }
                 ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Outlined.Send,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
                     Text(stringResource(R.string.chat_send))
                 }
             }
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun ChatBubble(msg: UiMessage, context: Context) {
-    val isUser = msg.role == "user"
-    val alignment = if (isUser) Alignment.End else Alignment.Start
-    val bg = if (isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
-
-    Column(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        horizontalAlignment = alignment
-    ) {
-        Text(
-            text = msg.role.uppercase(),
-            fontSize = 10.sp,
-            color = MaterialTheme.colorScheme.secondary,
-            modifier = Modifier.padding(bottom = 2.dp, start = 4.dp, end = 4.dp)
-        )
-        Box(
-            modifier = Modifier
-                .background(bg, shape = MaterialTheme.shapes.small)
-                .padding(12.dp)
-                .combinedClickable(
-                    onClick = {},
-                    onLongClick = {
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        clipboard.setPrimaryClip(ClipData.newPlainText("chat", msg.content))
-                        Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
-                    }
-                )
-                .semantics { contentDescription = "Long-press to copy ${msg.role} message" }
-        ) {
-            Text(text = msg.content, color = MaterialTheme.colorScheme.onSurface)
         }
     }
 }

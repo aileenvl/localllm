@@ -1,8 +1,18 @@
 package com.localllm.app.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -16,9 +26,21 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Bolt
+import androidx.compose.material.icons.outlined.Cancel
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Error
+import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.Pause
+import androidx.compose.material.icons.outlined.QueryStats
+import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -26,20 +48,30 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.localllm.app.R
 import com.localllm.app.RequestTracker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.max
 
 @Composable
 fun DashboardTab(coroutineScope: CoroutineScope) {
@@ -63,22 +95,26 @@ fun DashboardTab(coroutineScope: CoroutineScope) {
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // === 2x2 stat card grid ===
         item {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(stringResource(R.string.dash_live), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        Spacer(modifier = Modifier.weight(1f))
-                        QueueBadge(depth = queue.size)
-                    }
-                    val cur = current
-                    if (cur == null) {
-                        Text(stringResource(R.string.dash_idle), color = MaterialTheme.colorScheme.secondary)
-                    } else {
-                        CurrentRequestCard(entry = cur, now = now)
-                    }
-                    if (queue.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(4.dp))
+            StatCardGrid(stats = stats)
+        }
+
+        // === Throughput sparkline ===
+        item {
+            ThroughputCard(history = history)
+        }
+
+        // === In-flight emphasis ===
+        item {
+            InFlightCard(current = current, queueDepth = queue.size, now = now)
+        }
+
+        // Optional queue list when there are waiters
+        if (queue.isNotEmpty()) {
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
                             stringResource(R.string.dash_waiting, queue.size),
                             style = MaterialTheme.typography.labelMedium,
@@ -92,45 +128,30 @@ fun DashboardTab(coroutineScope: CoroutineScope) {
             }
         }
 
+        // === Cumulative stats block (legacy reset row) ===
         item {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(stringResource(R.string.dash_stats), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        Spacer(modifier = Modifier.weight(1f))
-                        TextButton(
-                            onClick = { coroutineScope.launch { RequestTracker.resetStats() } },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                        ) { Text(stringResource(R.string.dash_reset)) }
-                    }
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        StatTile(label = stringResource(R.string.dash_stat_total), value = stats.totalRequests.toString(), modifier = Modifier.weight(1f))
-                        StatTile(label = stringResource(R.string.dash_stat_ok), value = stats.totalCompleted.toString(), modifier = Modifier.weight(1f))
-                        StatTile(label = stringResource(R.string.dash_stat_err), value = (stats.totalErrors + stats.totalCancelled).toString(), modifier = Modifier.weight(1f))
-                    }
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        StatTile(
-                            label = stringResource(R.string.dash_stat_avg_latency),
-                            value = if (stats.totalCompleted > 0) "${stats.avgLatencyMs} ms" else "—",
-                            modifier = Modifier.weight(1f)
-                        )
-                        StatTile(
-                            label = stringResource(R.string.dash_stat_avg_tokens),
-                            value = if (stats.avgChunksPerSec > 0) "%.1f".format(stats.avgChunksPerSec) else "—",
-                            modifier = Modifier.weight(1f)
-                        )
-                        StatTile(
-                            label = stringResource(R.string.dash_stat_err_rate),
-                            value = if (stats.totalRequests > 0) "${(stats.errorRate * 100).toInt()}%" else "—",
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    stringResource(R.string.dash_stats),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                TextButton(
+                    onClick = { coroutineScope.launch { RequestTracker.resetStats() } },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                ) { Text(stringResource(R.string.dash_reset)) }
             }
         }
 
         item {
-            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
                     stringResource(R.string.dash_history, history.size),
                     style = MaterialTheme.typography.titleMedium,
@@ -162,6 +183,350 @@ fun DashboardTab(coroutineScope: CoroutineScope) {
     }
 }
 
+// =====================================================================
+// Stat card 2x2 grid
+// =====================================================================
+
+@Composable
+private fun StatCardGrid(stats: RequestTracker.Stats) {
+    // p50 of last 50 inferences. Stats.avgLatencyMs is mean — keep it as it's
+    // the only built-in metric; caption simply notes "last 50 reqs".
+    val totalToday = stats.totalRequests.toString()
+    val latencyValue = if (stats.totalCompleted > 0) "${stats.avgLatencyMs} ms" else "—"
+    val tokRate = if (stats.avgChunksPerSec > 0) "%.1f tok/s".format(stats.avgChunksPerSec) else "— tok/s"
+    val errPct: Float = stats.errorRate * 100f
+    val errStr = if (stats.totalRequests > 0) "%.1f%%".format(errPct) else "—"
+
+    val errColor = when {
+        stats.totalRequests == 0L -> MaterialTheme.colorScheme.onSurface
+        errPct < 1f -> Color(0xFF22C55E) // green
+        errPct < 5f -> Color(0xFFF59E0B) // amber
+        else -> MaterialTheme.colorScheme.error
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatCard(
+                icon = Icons.Outlined.QueryStats,
+                value = totalToday,
+                caption = stringResource(R.string.dash_stat_total_caption),
+                label = stringResource(R.string.dash_stat_total),
+                modifier = Modifier.weight(1f)
+            )
+            StatCard(
+                icon = Icons.Outlined.Timer,
+                value = latencyValue,
+                caption = stringResource(R.string.dash_stat_latency_caption),
+                label = stringResource(R.string.dash_stat_avg_latency),
+                modifier = Modifier.weight(1f)
+            )
+        }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatCard(
+                icon = Icons.Outlined.Bolt,
+                value = tokRate,
+                caption = stringResource(R.string.dash_stat_tokens_caption),
+                label = stringResource(R.string.dash_stat_avg_tokens),
+                modifier = Modifier.weight(1f)
+            )
+            StatCard(
+                icon = Icons.Outlined.ErrorOutline,
+                value = errStr,
+                caption = stringResource(R.string.dash_stat_err_rate_caption),
+                label = stringResource(R.string.dash_stat_err_rate),
+                valueColor = errColor,
+                modifier = Modifier.weight(1f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun StatCard(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    value: String,
+    caption: String,
+    label: String,
+    modifier: Modifier = Modifier,
+    valueColor: Color = MaterialTheme.colorScheme.onSurface
+) {
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Text(
+                text = value,
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                color = valueColor,
+                fontFamily = FontFamily.Monospace
+            )
+            Text(
+                text = caption,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+// =====================================================================
+// Throughput sparkline
+// =====================================================================
+
+@Composable
+private fun ThroughputCard(history: List<RequestTracker.Entry>) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Outlined.Bolt,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = stringResource(R.string.dash_throughput_title),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            // Build series: history is newest-first; reverse so chart reads left → right.
+            // Filter out NaN / non-finite tok/s defensively.
+            val series: List<Float> = remember(history) {
+                history.asReversed()
+                    .map { it.chunksPerSec }
+                    .filter { it.isFinite() && it >= 0f }
+                    .takeLast(50)
+            }
+
+            if (series.isEmpty()) {
+                Text(
+                    text = stringResource(R.string.dash_throughput_empty),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Sparkline(series = series)
+            }
+        }
+    }
+}
+
+@Composable
+private fun Sparkline(series: List<Float>) {
+    val primary = MaterialTheme.colorScheme.primary
+    val onSurfaceVar = MaterialTheme.colorScheme.onSurfaceVariant
+    val maxVal = (series.maxOrNull() ?: 0f).coerceAtLeast(0.0001f)
+
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth().height(100.dp)) {
+        val density = LocalDensity.current
+        val strokePx = with(density) { 2.dp.toPx() }
+
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+            val baselineY = h - strokePx
+            val topPad = strokePx * 2
+
+            if (series.size == 1) {
+                // Single point: draw a small dot centered horizontally.
+                val cx = w / 2f
+                val cy = baselineY - (series[0] / maxVal) * (h - topPad - strokePx)
+                drawCircle(color = primary, radius = strokePx * 1.5f, center = Offset(cx, cy))
+                // Baseline.
+                drawLine(
+                    color = onSurfaceVar.copy(alpha = 0.25f),
+                    start = Offset(0f, baselineY),
+                    end = Offset(w, baselineY),
+                    strokeWidth = 1f
+                )
+                return@Canvas
+            }
+
+            // Map series to canvas-space points.
+            val pts = ArrayList<Offset>(series.size)
+            val stepX = w / (series.size - 1).coerceAtLeast(1)
+            for (i in series.indices) {
+                val v = series[i]
+                val x = i * stepX
+                val y = baselineY - (v / maxVal) * (h - topPad - strokePx)
+                pts.add(Offset(x, y))
+            }
+
+            // Build smoothed path using Catmull-Rom → cubic Bezier conversion.
+            val linePath = Path().apply {
+                moveTo(pts[0].x, pts[0].y)
+                for (i in 0 until pts.size - 1) {
+                    val p0 = if (i == 0) pts[i] else pts[i - 1]
+                    val p1 = pts[i]
+                    val p2 = pts[i + 1]
+                    val p3 = if (i + 2 < pts.size) pts[i + 2] else p2
+                    // Catmull-Rom → Bezier control points (uniform, tension=0.5).
+                    val c1 = Offset(
+                        p1.x + (p2.x - p0.x) / 6f,
+                        p1.y + (p2.y - p0.y) / 6f
+                    )
+                    val c2 = Offset(
+                        p2.x - (p3.x - p1.x) / 6f,
+                        p2.y - (p3.y - p1.y) / 6f
+                    )
+                    cubicTo(c1.x, c1.y, c2.x, c2.y, p2.x, p2.y)
+                }
+            }
+
+            // Fill path: clone line + close to baseline.
+            val fillPath = Path().apply {
+                addPath(linePath)
+                lineTo(pts.last().x, baselineY)
+                lineTo(pts.first().x, baselineY)
+                close()
+            }
+
+            // Baseline.
+            drawLine(
+                color = onSurfaceVar.copy(alpha = 0.25f),
+                start = Offset(0f, baselineY),
+                end = Offset(w, baselineY),
+                strokeWidth = 1f
+            )
+            drawPath(path = fillPath, brush = SolidColor(primary.copy(alpha = 0.20f)))
+            drawPath(
+                path = linePath,
+                brush = SolidColor(primary),
+                style = Stroke(width = strokePx)
+            )
+        }
+
+        // Max-Y label, top-right.
+        Text(
+            text = "max %.1f tok/s".format(maxVal),
+            style = MaterialTheme.typography.bodySmall,
+            color = onSurfaceVar,
+            modifier = Modifier.align(Alignment.TopEnd).padding(end = 4.dp)
+        )
+    }
+}
+
+// =====================================================================
+// In-flight emphasis card
+// =====================================================================
+
+@Composable
+private fun InFlightCard(current: RequestTracker.Entry?, queueDepth: Int, now: Long) {
+    if (current == null) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Row(
+                modifier = Modifier.padding(14.dp).fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Pause,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = stringResource(R.string.dash_idle_status),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                QueueBadge(depth = queueDepth)
+            }
+        }
+        return
+    }
+
+    val infinite = rememberInfiniteTransition(label = "boltSpin")
+    val angle by infinite.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1800, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "boltAngle"
+    )
+
+    val primary = MaterialTheme.colorScheme.primary
+    OutlinedCard(
+        modifier = Modifier.fillMaxWidth(),
+        border = androidx.compose.foundation.BorderStroke(1.5.dp, primary),
+        colors = CardDefaults.outlinedCardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.18f)
+        )
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Outlined.Bolt,
+                    contentDescription = null,
+                    tint = primary,
+                    modifier = Modifier.size(22.dp).rotate(angle)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "#${current.id} ${current.model}",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = stringResource(R.string.dash_running_label, formatMs(current.inferenceMs(now))),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                QueueBadge(depth = queueDepth)
+            }
+
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+
+            val elapsed = current.inferenceMs(now)
+            val rate = if (elapsed > 250 && current.chunkCount > 0) {
+                current.chunkCount.toFloat() * 1000f / elapsed
+            } else 0f
+            Text(
+                text = "${current.chunkCount} tok · %.1f tok/s · waited %s".format(
+                    rate, formatMs(current.queueWaitMs(now))
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+    }
+}
+
+// =====================================================================
+// Queue row (small reuse)
+// =====================================================================
+
 @Composable
 private fun QueueBadge(depth: Int) {
     val color = when {
@@ -178,42 +543,6 @@ private fun QueueBadge(depth: Int) {
             text = stringResource(R.string.dash_queue_label, depth),
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurface
-        )
-    }
-}
-
-@Composable
-private fun CurrentRequestCard(entry: RequestTracker.Entry, now: Long) {
-    val elapsed = entry.inferenceMs(now)
-    val waited = entry.queueWaitMs(now)
-    val tokPerSec = if (elapsed > 250 && entry.chunkCount > 0) {
-        entry.chunkCount.toFloat() * 1000f / elapsed
-    } else 0f
-
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .size(8.dp)
-                    .background(Color(0xFF4ECDC4), shape = CircleShape)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = "#${entry.id} ${entry.model}${if (entry.stream) " (stream)" else ""}",
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium
-            )
-        }
-        Text(
-            text = "elapsed ${formatMs(elapsed)} · waited ${formatMs(waited)} · ${entry.chunkCount} tok · ${"%.1f".format(tokPerSec)} tok/s",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.secondary,
-            fontFamily = FontFamily.Monospace
-        )
-        Text(
-            text = "prompt: ${entry.messageCount} msgs / ${entry.promptChars} chars",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.secondary
         )
     }
 }
@@ -244,92 +573,84 @@ private fun QueuedRequestRow(position: Int, entry: RequestTracker.Entry, now: Lo
     }
 }
 
-@Composable
-private fun StatTile(label: String, value: String, modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .background(MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.small)
-            .padding(vertical = 10.dp, horizontal = 8.dp)
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(
-                text = value,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface,
-                fontFamily = FontFamily.Monospace
-            )
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.secondary
-            )
-        }
-    }
-}
+// =====================================================================
+// History rows (expandable on tap)
+// =====================================================================
 
 @Composable
 private fun HistoryRow(entry: RequestTracker.Entry) {
-    val (statusColor, statusLabel) = when (entry.state) {
-        RequestTracker.State.COMPLETED -> Color(0xFF4ECDC4) to stringResource(R.string.dash_state_ok)
-        RequestTracker.State.ERRORED -> Color(0xFFFF4757) to stringResource(R.string.dash_state_err)
-        RequestTracker.State.CANCELLED -> Color(0xFFC5C6C7) to stringResource(R.string.dash_state_cxl)
-        else -> Color(0xFFC5C6C7) to entry.state.name
+    val (statusIcon, statusColor) = when (entry.state) {
+        RequestTracker.State.COMPLETED -> Icons.Outlined.CheckCircle to Color(0xFF22C55E)
+        RequestTracker.State.CANCELLED -> Icons.Outlined.Cancel to Color(0xFFC5C6C7)
+        RequestTracker.State.ERRORED -> Icons.Outlined.Error to MaterialTheme.colorScheme.error
+        else -> Icons.Outlined.Cancel to Color(0xFFC5C6C7)
     }
+
+    var expanded by remember { mutableStateOf(false) }
+
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .background(statusColor.copy(alpha = 0.25f), shape = MaterialTheme.shapes.small)
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                ) {
-                    Text(
-                        text = statusLabel,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = statusColor,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
+                Icon(
+                    imageVector = statusIcon,
+                    contentDescription = null,
+                    tint = statusColor,
+                    modifier = Modifier.size(20.dp)
+                )
                 Spacer(modifier = Modifier.width(8.dp))
+                val infMs = entry.inferenceMs()
+                Text(
+                    text = "${entry.model} · ${formatMs(infMs)} · ${entry.chunkCount} tok",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1
+                )
                 Text(
                     text = "#${entry.id}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.secondary,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontFamily = FontFamily.Monospace
                 )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = entry.model,
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.weight(1f)
-                )
-                Text(
-                    text = relativeTime(entry.completedAt ?: entry.enqueuedAt),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.secondary
-                )
             }
-            val infMs = entry.inferenceMs()
-            val tps = entry.chunksPerSec
+            // Second line: time + remote (Entry has no remote IP — show time only).
             Text(
-                text = "${formatMs(infMs)} · ${entry.chunkCount} tok · ${"%.1f".format(tps)} tok/s · waited ${formatMs(entry.queueWaitMs())}",
+                text = relativeTime(entry.completedAt ?: entry.enqueuedAt),
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.secondary,
-                fontFamily = FontFamily.Monospace
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            if (entry.error != null) {
-                Text(
-                    text = entry.error,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
-                )
+
+            AnimatedVisibility(visible = expanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = "tok/s %.2f · waited %s · prompt %d msgs / %d chars · out %d chars".format(
+                            entry.chunksPerSec,
+                            formatMs(entry.queueWaitMs()),
+                            entry.messageCount,
+                            entry.promptChars,
+                            entry.outputChars
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    if (entry.stream) {
+                        Text(
+                            text = "stream",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    if (entry.error != null) {
+                        Text(
+                            text = entry.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
             }
         }
     }
