@@ -137,16 +137,65 @@ day retention). JDK 17, Temurin. No daemon — fresh VMs don't benefit
 and the Gradle daemon's resident heap occasionally OOMs the 7 GB
 runner.
 
-There is *no* release pipeline in CI. Cutting a release is manual:
+!!! note "GitHub Actions currently unavailable on this repo"
+    The hosting account has Actions administratively restricted
+    (Trust & Safety review in progress with GitHub Support). While
+    that's pending, **CI parity is enforced locally**:
+
+    ```bash
+    ./gradlew lint testDebugUnitTest assembleDebug --no-daemon
+    ```
+
+    Contributors run this before opening a PR; maintainers run the
+    same command before merging. The `build.yml` workflow stays in
+    tree and will auto-resume once Actions is re-enabled — no
+    changes needed.
+
+## Docs deploy (manual, while Actions is out)
+
+The mkdocs Material site publishes to GitHub Pages from the
+`gh-pages` branch (legacy branch-source mode, bypassing Actions).
+One-time setup per machine:
 
 ```bash
-./gradlew :app:assembleDebug
-gh release create v1.x.y \
-  --target $(git branch --show-current) \
-  --title "LocalLLM v1.x.y" \
-  --notes "..." \
-  app/build/outputs/apk/debug/app-debug.apk
+python3 -m venv .venv-docs
+.venv-docs/bin/pip install -r docs/requirements.txt
 ```
+
+To publish the current `docs/` state:
+
+```bash
+.venv-docs/bin/mkdocs gh-deploy --force --remote-branch gh-pages
+```
+
+That builds the site, commits to `gh-pages`, and pushes. Pages picks
+it up within a minute at the repo's custom domain
+(`http://www.tahabouhsine.com/localllm/`). When Actions is restored,
+flip Pages source back to "GitHub Actions" and the existing
+`docs.yml` workflow takes over.
+
+## Cutting a release
+
+One command:
+
+```bash
+./scripts/release.sh v1.2.3
+```
+
+`scripts/release.sh` (see source for details):
+
+1. Refuses to run on a dirty working tree.
+2. Runs `./gradlew :app:assembleDebug`.
+3. Runs `mkdocs gh-deploy` to publish the docs.
+4. Tags the current commit and pushes the tag.
+5. Reads release notes from the matching `## [1.2.3]` section in
+   `CHANGELOG.md` and calls `gh release create` with the APK
+   attached.
+
+The tag prefix must be `v<semver>`. Notes are sourced from
+`CHANGELOG.md` so the changelog stays the source of truth — forget
+to add a section and the release goes out with a placeholder note
+and a stderr warning.
 
 Don't try to ship to the Play Store from this debug APK — minify is
 disabled (`isMinifyEnabled = false`), there's no signing config, and
