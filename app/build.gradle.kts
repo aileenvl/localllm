@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.kotlinAndroid)
     alias(libs.plugins.kotlinCompose)
+    alias(libs.plugins.androidxBaselineProfile)
 }
 
 android {
@@ -16,13 +17,52 @@ android {
         versionName = "1.0"
     }
 
+    signingConfigs {
+        create("release") {
+            // Read from ~/.gradle/gradle.properties or env. NEVER hardcode.
+            val keystorePath = (findProperty("LOCALLLM_KEYSTORE_PATH") as String?)
+                ?: System.getenv("LOCALLLM_KEYSTORE_PATH")
+            val keystorePassword = (findProperty("LOCALLLM_KEYSTORE_PASSWORD") as String?)
+                ?: System.getenv("LOCALLLM_KEYSTORE_PASSWORD")
+            val keyAlias = (findProperty("LOCALLLM_KEY_ALIAS") as String?)
+                ?: System.getenv("LOCALLLM_KEY_ALIAS")
+            val keyPassword = (findProperty("LOCALLLM_KEY_PASSWORD") as String?)
+                ?: System.getenv("LOCALLLM_KEY_PASSWORD")
+
+            if (keystorePath != null && keystorePassword != null && keyAlias != null && keyPassword != null) {
+                storeFile = file(keystorePath)
+                this.storePassword = keystorePassword
+                this.keyAlias = keyAlias
+                this.keyPassword = keyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            val releaseCfg = signingConfigs.getByName("release")
+            signingConfig = if (releaseCfg.storeFile != null) releaseCfg else signingConfigs.getByName("debug")
+        }
+        debug {
+            // unchanged
+        }
+    }
+
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            // LiteRT-LM 0.11.0 AAR ships JNI .so files for arm64-v8a only;
+            // armeabi-v7a is intentionally excluded. x86 / x86_64 are dropped —
+            // emulator inference on x86 is unusably slow anyway (see docs/development.md).
+            include("arm64-v8a")
+            isUniversalApk = true
         }
     }
     compileOptions {
@@ -65,6 +105,9 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.androidx.lifecycle.runtime.compose)
 
+    // Async, Flow-native settings persistence (replaces SharedPreferences)
+    implementation(libs.androidx.datastore.preferences)
+
     // Ktor Server (OpenAI-compatible HTTP API)
     implementation(libs.ktor.server.core)
     implementation(libs.ktor.server.netty)
@@ -84,4 +127,8 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
+
+    // R8 consumes the profile produced by the :macrobenchmark module to
+    // AOT-compile the hot startup paths in release builds.
+    baselineProfile(project(":macrobenchmark"))
 }

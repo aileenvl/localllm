@@ -4,6 +4,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ComponentCallbacks2
 import android.content.Intent
 import android.os.IBinder
 import android.os.PowerManager
@@ -234,7 +235,84 @@ class LLMServerService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        // START_STICKY contract: when the OS kills us under memory pressure
+        // (LMK) Android will re-create the service later with a `null` intent.
+        // That's fine — [onCreate] unconditionally calls [startServer] and
+        // [startIdleMonitor], so the HTTP listener is back on its bound port
+        // within ~2s of the cold-start. The original triggering intent is
+        // intentionally not redelivered (we don't need REDELIVER_INTENT — the
+        // service has no per-intent work, only ambient long-running state).
         return START_STICKY
+    }
+
+    /**
+     * Memory-pressure callback. Each cached engine pins 2–3 GB of model weights,
+     * so dropping even one entry under pressure is often the difference between
+     * surviving the next LMK pass and being killed cold.
+     *
+     * Contract: this fires on the main thread, so we only do the bookkeeping
+     * inline (mutex try-lock + log) and offload the actual `evictAll`/`remove`
+     * work to [serviceScope] so the system callback returns immediately.
+     * Eviction never interrupts an active inference — if [inferenceMutex] is
+     * held we just bail and log.
+     */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        when (level) {
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE,
+            ComponentCallbacks2.TRIM_MEMORY_BACKGROUND -> {
+                LogManager.i("MemoryPressure", "trim level=$level, action=log-only (moderate/background)")
+            }
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW,
+            ComponentCallbacks2.TRIM_MEMORY_MODERATE -> {
+                serviceScope.launch {
+                    if (inferenceMutex.tryLock()) {
+                        try {
+                            val before = engines.size()
+                            if (before > 1) {
+                                engines.trimToSize(1)
+                                LogManager.i("MemoryPressure", "trim level=$level, action=shrunk LRU from $before to ${engines.size()}")
+                            } else {
+                                LogManager.i("MemoryPressure", "trim level=$level, action=noop (engines=$before)")
+                            }
+                        } finally {
+                            inferenceMutex.unlock()
+                        }
+                    } else {
+                        LogManager.i("MemoryPressure", "trim level=$level, action=skipped (inference active)")
+                    }
+                }
+            }
+            ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL,
+            ComponentCallbacks2.TRIM_MEMORY_COMPLETE -> {
+                serviceScope.launch {
+                    if (inferenceMutex.tryLock()) {
+                        try {
+                            val nEngines = engines.size()
+                            val nSessions = sessions.size()
+                            // Sessions hold conversations tied to engines; clear them
+                            // first so the engine eviction callback doesn't double-close.
+                            sessions.evictAll()
+                            engines.evictAll()
+                            LogManager.i("MemoryPressure", "trim level=$level, action=evicted all ($nEngines engines, $nSessions sessions)")
+                        } finally {
+                            inferenceMutex.unlock()
+                        }
+                    } else {
+                        LogManager.w("MemoryPressure", "trim level=$level, action=could-not-acquire-lock (inference active; LMK may kill us)")
+                    }
+                }
+            }
+            ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN -> {
+                // App went to background. The idle eviction loop already handles
+                // long-running background; evicting eagerly here would just thrash
+                // (evict + reload) every time the user tabs out.
+                LogManager.i("MemoryPressure", "trim level=$level, action=noop (UI hidden; idle loop handles background)")
+            }
+            else -> {
+                LogManager.i("MemoryPressure", "trim level=$level, action=noop (unknown level)")
+            }
+        }
     }
 
     private fun startForeground() {

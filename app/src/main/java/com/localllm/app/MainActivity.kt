@@ -34,10 +34,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.localllm.app.ui.AppTab
 import com.localllm.app.ui.ChatTab
 import com.localllm.app.ui.ConsoleTab
@@ -233,6 +237,28 @@ class MainActivity : ComponentActivity() {
                 ) {
                     startServer()
                 }
+            }
+
+            // Process-lifecycle awareness: if the OS killed our foreground service
+            // while the Activity was backgrounded (LMK under memory pressure) and
+            // the user then returns to the app, the LaunchedEffect above won't
+            // re-fire because none of its keys changed. We hook ON_START to
+            // re-check ServerState and kick the service when autostart is on and
+            // there are models available.
+            val lifecycleOwner = LocalLifecycleOwner.current
+            DisposableEffect(lifecycleOwner) {
+                val observer = LifecycleEventObserver { _, event ->
+                    if (event == Lifecycle.Event.ON_START &&
+                        ServerState.status.value == ServerState.Status.STOPPED &&
+                        Settings.autostart(context) &&
+                        existingModels.isNotEmpty() &&
+                        hasNotificationPermission
+                    ) {
+                        startServer()
+                    }
+                }
+                lifecycleOwner.lifecycle.addObserver(observer)
+                onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
             }
 
             MaterialTheme(colorScheme = DarkColors) {

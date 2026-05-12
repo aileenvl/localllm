@@ -65,10 +65,16 @@ object Settings {
      * Returns the raw [SharedPreferences]. This is the only documented escape
      * hatch for callers that need direct prefs access (e.g. tests that wipe
      * state in `@Before`). Because direct edits via this path bypass the
-     * repository's in-memory flows, we reset the repository singleton here —
-     * the next read will re-seed the flows from disk.
+     * repository's in-memory flows AND the new DataStore-backed persistence,
+     * we reset the repository singleton AND wipe the DataStore here — the
+     * next read will re-seed the flows. Any direct SharedPreferences writes
+     * made via the returned handle within the same process will NOT be
+     * observed (DataStore's [androidx.datastore.preferences.SharedPreferencesMigration]
+     * only runs once); for test fixtures, write through the repo instead.
      */
     fun prefs(context: Context): SharedPreferences {
+        // Wipe DataStore first so the freshly-built repo sees empty state.
+        SettingsRepository.wipeForTesting(context)
         SettingsRepository.resetForTesting()
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     }

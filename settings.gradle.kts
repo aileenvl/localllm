@@ -24,3 +24,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "localllm-android"
 include(":app")
+include(":macrobenchmark")

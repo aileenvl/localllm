@@ -122,6 +122,34 @@ verification is a manual `curl` against a real `adb forward`. If you
 add an `androidTest` source set, expect the model fixture to be the
 hard part — a 2.6 GB binary blob doesn't belong in git.
 
+## Baseline profiles & macrobenchmark
+
+The `:macrobenchmark` module (under `macrobenchmark/`) holds the
+Macrobenchmark + Baseline Profile generator. It uses the `com.android.test`
+plugin and `androidx.baselineprofile`, targets `:app` via
+`targetProjectPath = ":app"`, and runs alongside the target with
+`android.experimental.self-instrumenting = true`.
+
+Two test classes are wired up:
+
+- `StartupBenchmark` — cold-start `StartupTimingMetric` with
+  `CompilationMode.None / Partial / Full`, five iterations each.
+- `BaselineProfileGenerator` — walks Catalog → Dashboard → Console
+  → Chat → Settings so the produced profile covers the hot
+  composables.
+
+Both require a **connected device** (USB or wireless ADB) — they
+are not part of `assembleDebug`. To regenerate the profile:
+
+```bash
+./gradlew :app:generateReleaseBaselineProfile
+# Outputs app/src/main/baseline-prof.txt, consumed by R8 at release-build time.
+```
+
+Baseline profiles **only** apply to release builds (R8-compiled),
+so the perf win is invisible in `:app:assembleDebug` — ship a
+release variant to feel it.
+
 ## Continuous integration
 
 `.github/workflows/build.yml` runs on every push and PR against
@@ -227,35 +255,80 @@ contract:
    emit a `writeSseError` chunk on failure — *don't* try to
    `call.respond` after headers have committed.
 
-## Building from source for distribution
+## Release builds and signing
 
-This APK is not currently shipped to the Play Store. For your own
-sideload distribution:
+The release build pipeline is wired in `app/build.gradle.kts`:
 
-1. Generate a release keystore (one-time):
-   ```bash
-   keytool -genkey -v -keystore release.keystore -alias localllm \
-     -keyalg RSA -keysize 4096 -validity 10000
-   ```
+- `isMinifyEnabled = true` + `isShrinkResources = true` — R8 + the
+  resource shrinker run on every `:app:assembleRelease`.
+- `signingConfigs.release` reads four properties from
+  `~/.gradle/gradle.properties` *or* environment variables. If any of
+  the four is missing the config is silently empty and the release
+  build falls back to the **debug** signing key, so
+  `:app:assembleRelease` completes for every contributor without
+  needing access to the production keystore.
+- `splits.abi` ships per-ABI APKs for `arm64-v8a` plus a universal
+  APK (`isUniversalApk = true`). `armeabi-v7a` and the x86 family are
+  intentionally dropped — see the gotcha below.
 
-2. Add a `signingConfigs.release` block to `app/build.gradle.kts`
-   pointing at it. **Don't commit the keystore.** Read the
-   passwords from environment variables or `~/.gradle/gradle.properties`.
+### One-time keystore setup
 
-3. Set `isMinifyEnabled = true` in the release `buildTypes` block.
-   The `proguard-rules.pro` file already has keeps for LiteRT-LM,
-   Ktor, Netty, Gson, Compose, and our `ApiTypes.kt` data classes —
-   verify with `./gradlew :app:assembleRelease` and a smoke-test on
-   device.
+```bash
+keytool -genkey -v -keystore localllm-release.keystore \
+  -alias localllm -keyalg RSA -keysize 4096 -validity 10000
+```
 
-4. Distribute via the
-   [GitHub Releases page](https://github.com/mlnomadpy/localllm/releases)
-   or your own channel.
+Move it somewhere outside the repo (the project `.gitignore` blocks
+`*.keystore` and `*.jks`, but keeping it out of the source tree is
+safer still). Then add the four properties to your **user-level**
+`~/.gradle/gradle.properties`:
 
-If you want **Play Store distribution**, add Crashlytics or Sentry,
-target `targetSdk = 35`, audit
-`Settings.allowCors` defaults, and replace the in-memory `LogManager`
-ring buffer with a persistent crash log. None of that is in tree yet.
+```properties
+LOCALLLM_KEYSTORE_PATH=/Users/you/keys/localllm-release.keystore
+LOCALLLM_KEYSTORE_PASSWORD=********
+LOCALLLM_KEY_ALIAS=localllm
+LOCALLLM_KEY_PASSWORD=********
+```
+
+Environment variables with the same names also work — handy for CI.
+If both are set, the Gradle property wins.
+
+### Build outputs
+
+```bash
+./gradlew :app:assembleRelease   # per-ABI + universal APKs
+./gradlew :app:bundleRelease     # .aab for Play Store / Internal App Sharing
+```
+
+`app/build/outputs/apk/release/` will contain:
+
+- `app-arm64-v8a-release.apk` — per-ABI, smallest (~28 MB)
+- `app-universal-release.apk` — fat APK with all included ABIs (~39 MB)
+
+Verify the JNI payload of each split:
+
+```bash
+unzip -l app/build/outputs/apk/release/app-arm64-v8a-release.apk | grep '\.so$'
+```
+
+Only `lib/arm64-v8a/...` entries should appear in the per-ABI APK.
+
+### LiteRT-LM ABI gotcha
+
+The `com.google.ai.edge.litertlm:litertlm-android:0.11.0` AAR ships
+JNI `.so` files for **`arm64-v8a` and `x86_64` only**:
+
+- `lib/arm64-v8a/`: `libLiteRt.so`, `libLiteRtClGlAccelerator.so`,
+  `liblitertlm_jni.so`
+- `lib/x86_64/`: same three libs (emulator-only convenience)
+- `lib/armeabi-v7a/`: **none** — LiteRT-LM doesn't target 32-bit ARM.
+
+`splits.abi.include` is set to `arm64-v8a` only. Re-adding
+`armeabi-v7a` would produce an APK that crashes on first inference
+with `UnsatisfiedLinkError`. `x86_64` is omitted from the per-ABI
+split list because emulator inference is unusably slow, but the
+**universal APK still carries x86_64** so an emulator install via
+the universal APK works for smoke tests.
 
 ## Roadmap
 
