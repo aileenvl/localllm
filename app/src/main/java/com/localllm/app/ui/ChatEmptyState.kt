@@ -1,19 +1,16 @@
 package com.localllm.app.ui
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -30,10 +27,13 @@ import androidx.compose.ui.unit.dp
 import com.localllm.app.R
 
 /**
- * The Chat tab's empty state. Big sparkle icon, friendly title, and a row of
- * tappable sample prompts. Chips fill the input box but don't auto-send so the
- * user retains control.
+ * Chat tab empty state — drastically slimmer than the v1 hero. No icon, no
+ * title — just a placeholder line and four sample-prompt chips wrapping
+ * naturally via [FlowRow] so they don't horizontally scroll. Tapping a chip
+ * stuffs the prompt into the input box but doesn't auto-send (the user still
+ * presses Send so they can tweak the prompt first).
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ChatEmptyState(
     onPromptSelected: (String) -> Unit,
@@ -54,33 +54,19 @@ fun ChatEmptyState(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Icon(
-            imageVector = Icons.Outlined.AutoAwesome,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(56.dp)
-        )
-        Spacer(modifier = Modifier.height(12.dp))
         Text(
-            text = stringResource(R.string.chat_empty_title),
-            style = MaterialTheme.typography.titleLarge,
-            color = MaterialTheme.colorScheme.onSurface,
-            textAlign = TextAlign.Center
-        )
-        Spacer(modifier = Modifier.height(6.dp))
-        Text(
-            text = stringResource(R.string.chat_empty_body),
+            text = stringResource(R.string.chat_empty),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center
         )
-        Spacer(modifier = Modifier.height(20.dp))
-        LazyRow(
+        Spacer(modifier = Modifier.height(16.dp))
+        FlowRow(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            items(samples) { text ->
+            samples.forEach { text ->
                 AssistChip(
                     onClick = { onPromptSelected(text) },
                     leadingIcon = {
@@ -93,7 +79,7 @@ fun ChatEmptyState(
                     label = {
                         Text(
                             text = text,
-                            maxLines = 1,
+                            maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
                     }

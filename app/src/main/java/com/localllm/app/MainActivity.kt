@@ -15,16 +15,36 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.outlined.BarChart
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
-import androidx.compose.ui.res.stringResource
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -33,10 +53,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -46,9 +69,9 @@ import com.localllm.app.ui.AppTab
 import com.localllm.app.ui.ChatTab
 import com.localllm.app.ui.ConsoleTab
 import com.localllm.app.ui.DashboardTab
-import com.localllm.app.ui.Header
 import com.localllm.app.ui.ModelsTab
 import com.localllm.app.ui.SettingsTab
+import com.localllm.app.ui.StatusDot
 import com.localllm.app.ui.UiMessage
 import com.localllm.app.ui.sendChatMessage
 import java.io.BufferedInputStream
@@ -66,7 +89,8 @@ import kotlinx.coroutines.withContext
  *
  *   1. Own the cross-tab UI state (active tab, model list, chat messages…).
  *   2. Run lifecycle effects (file picker, model directory polling, autostart).
- *   3. Compose the [Header] + tab row + the right tab's composable.
+ *   3. Compose a Material 3 [Scaffold] with a compact top app bar and a 5-item
+ *      bottom navigation bar; render the right tab's composable in the body.
  *
  * All tab contents and presentation logic live in [com.localllm.app.ui].
  */
@@ -75,6 +99,7 @@ class MainActivity : ComponentActivity() {
     private fun getModelFile(filename: String): File =
         File(getExternalFilesDir(null), filename)
 
+    @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -106,6 +131,12 @@ class MainActivity : ComponentActivity() {
             var chatTokenCount by remember { mutableStateOf(0) }
             var chatElapsedMs by remember { mutableStateOf(0L) }
 
+            // Triggers passed to ChatTab so the top-app-bar action buttons can
+            // drive sheet/dialog state living inside the tab. Incrementing the
+            // counter is observed by a LaunchedEffect inside ChatTab.
+            var systemPromptTrigger by remember { mutableStateOf(0) }
+            var clearChatTrigger by remember { mutableStateOf(0) }
+
             var customUrls by remember { mutableStateOf(Settings.customModelUrls(context)) }
 
             LaunchedEffect(existingModels) {
@@ -122,9 +153,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // Disk poll for newly imported/downloaded models — only on the tabs
-            // that display the list. One immediate refresh on tab switch so the
-            // user sees fresh data without waiting.
             LaunchedEffect(activeTab) {
                 refreshExistingModels(context) { names, sizes, mtimes ->
                     existingModels = names
@@ -159,9 +187,6 @@ class MainActivity : ComponentActivity() {
                                 if (status == DownloadManager.STATUS_SUCCESSFUL || status == DownloadManager.STATUS_FAILED) {
                                     toRemove.add(filename)
                                     if (status == DownloadManager.STATUS_SUCCESSFUL) {
-                                        // Hashing a multi-GB file is slow (~20s); run off the
-                                        // polling loop so progress for other downloads keeps
-                                        // updating. Verification is a no-op when sha256 == null.
                                         coroutineScope.launch {
                                             val ok = withContext(Dispatchers.IO) {
                                                 verifyDownloadedModel(filename)
@@ -239,8 +264,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // Autostart sequence: request notification permission first, then
-            // (when granted and a model is present) start the server.
             LaunchedEffect(existingModels.isNotEmpty(), hasNotificationPermission) {
                 if (!hasNotificationPermission && Build.VERSION.SDK_INT >= 33) {
                     permLauncher.launch("android.permission.POST_NOTIFICATIONS")
@@ -252,12 +275,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // Process-lifecycle awareness: if the OS killed our foreground service
-            // while the Activity was backgrounded (LMK under memory pressure) and
-            // the user then returns to the app, the LaunchedEffect above won't
-            // re-fire because none of its keys changed. We hook ON_START to
-            // re-check ServerState and kick the service when autostart is on and
-            // there are models available.
             val lifecycleOwner = LocalLifecycleOwner.current
             DisposableEffect(lifecycleOwner) {
                 val observer = LifecycleEventObserver { _, event ->
@@ -274,76 +291,81 @@ class MainActivity : ComponentActivity() {
                 onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
             }
 
+            val copyUrl: () -> Unit = {
+                val url = serverUrl
+                if (url != null) {
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(ClipData.newPlainText(getString(R.string.app_name), url))
+                    Toast.makeText(context, getString(R.string.toast_url_copied, url), Toast.LENGTH_SHORT).show()
+                }
+            }
+
             MaterialTheme(colorScheme = DarkColors) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        Header(
-                            status = serverStatus,
-                            url = serverUrl,
-                            onCopyUrl = {
-                                val url = serverUrl ?: return@Header
-                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                clipboard.setPrimaryClip(ClipData.newPlainText(getString(R.string.app_name), url))
-                                Toast.makeText(context, getString(R.string.toast_url_copied, url), Toast.LENGTH_SHORT).show()
-                            }
-                        )
-
-                        ScrollableTabRow(
-                            selectedTabIndex = activeTab.ordinal,
-                            containerColor = MaterialTheme.colorScheme.surface,
-                            contentColor = MaterialTheme.colorScheme.primary,
-                            edgePadding = 0.dp
+                    Scaffold(
+                        topBar = {
+                            CompactAppBar(
+                                serverStatus = serverStatus,
+                                serverUrl = serverUrl,
+                                onCopyUrl = copyUrl,
+                                activeTab = activeTab,
+                                onOpenSystemPrompt = { systemPromptTrigger++ },
+                                onClearChat = { clearChatTrigger++ },
+                            )
+                        },
+                        bottomBar = {
+                            AppNavigationBar(
+                                activeTab = activeTab,
+                                onTabSelected = { activeTab = it },
+                            )
+                        },
+                        containerColor = MaterialTheme.colorScheme.background,
+                    ) { paddingValues ->
+                        Box(
+                            modifier = Modifier
+                                .padding(paddingValues)
+                                .fillMaxSize()
                         ) {
-                            AppTab.values().forEach { t ->
-                                Tab(
-                                    selected = activeTab == t,
-                                    onClick = { activeTab = t },
-                                    text = {
-                                        Text(
-                                            stringResource(t.labelRes),
-                                            maxLines = 1,
-                                            softWrap = false
-                                        )
-                                    }
-                                )
-                            }
-                        }
-
-                        Box(modifier = Modifier.fillMaxSize().padding(16.dp)) {
                             when (activeTab) {
-                                AppTab.MODELS -> ModelsTab(
-                                    builtIn = AVAILABLE_MODELS,
-                                    customUrls = customUrls,
-                                    existingModels = existingModels,
-                                    modelSizes = modelSizes,
-                                    modelMtimes = modelMtimes,
-                                    activeDownloads = activeDownloads,
-                                    downloadProgress = downloadProgress,
-                                    downloadTotalBytes = downloadTotalBytes,
-                                    onDownload = { model ->
-                                        activeDownloads[model.filename] = startDownload(context, model)
-                                    },
-                                    onCancel = { model ->
-                                        val id = activeDownloads[model.filename]
-                                        if (id != null) {
-                                            val manager = context.getSystemService(DownloadManager::class.java)
-                                            manager.remove(id)
-                                            activeDownloads.remove(model.filename)
-                                            downloadProgress.remove(model.filename)
-                                            downloadTotalBytes.remove(model.filename)
-                                        }
-                                    },
-                                    onDelete = { model ->
-                                        getModelFile(model.filename).delete()
-                                        existingModels = existingModels - model.filename
-                                    },
-                                    onImport = { filePickerLauncher.launch(arrayOf("*/*")) }
-                                )
-                                AppTab.DASHBOARD -> DashboardTab(coroutineScope = coroutineScope)
-                                AppTab.CONSOLE -> ConsoleTab(logHistory = logHistory, listState = listState)
+                                AppTab.MODELS -> Box(Modifier.padding(16.dp)) {
+                                    ModelsTab(
+                                        builtIn = AVAILABLE_MODELS,
+                                        customUrls = customUrls,
+                                        existingModels = existingModels,
+                                        modelSizes = modelSizes,
+                                        modelMtimes = modelMtimes,
+                                        activeDownloads = activeDownloads,
+                                        downloadProgress = downloadProgress,
+                                        downloadTotalBytes = downloadTotalBytes,
+                                        onDownload = { model ->
+                                            activeDownloads[model.filename] = startDownload(context, model)
+                                        },
+                                        onCancel = { model ->
+                                            val id = activeDownloads[model.filename]
+                                            if (id != null) {
+                                                val manager = context.getSystemService(DownloadManager::class.java)
+                                                manager.remove(id)
+                                                activeDownloads.remove(model.filename)
+                                                downloadProgress.remove(model.filename)
+                                                downloadTotalBytes.remove(model.filename)
+                                            }
+                                        },
+                                        onDelete = { model ->
+                                            getModelFile(model.filename).delete()
+                                            existingModels = existingModels - model.filename
+                                        },
+                                        onImport = { filePickerLauncher.launch(arrayOf("*/*")) }
+                                    )
+                                }
+                                AppTab.DASHBOARD -> Box(Modifier.padding(16.dp)) {
+                                    DashboardTab(coroutineScope = coroutineScope)
+                                }
+                                AppTab.CONSOLE -> Box(Modifier.padding(16.dp)) {
+                                    ConsoleTab(logHistory = logHistory, listState = listState)
+                                }
                                 AppTab.CHAT -> ChatTab(
                                     existingModels = existingModels,
                                     selectedModel = selectedModel,
@@ -378,25 +400,28 @@ class MainActivity : ComponentActivity() {
                                             )
                                         }
                                     },
-                                    onStop = {
-                                        chatJob?.cancel()
-                                    },
+                                    onStop = { chatJob?.cancel() },
                                     chatListState = chatListState,
                                     tokenRate = chatTokenRate,
                                     tokenCount = chatTokenCount,
-                                    streamElapsedMs = chatElapsedMs
+                                    streamElapsedMs = chatElapsedMs,
+                                    openSystemPromptTrigger = systemPromptTrigger,
+                                    clearChatTrigger = clearChatTrigger,
+                                    onClearChat = { chatMessages.clear() },
                                 )
-                                AppTab.SETTINGS -> SettingsTab(
-                                    context = context,
-                                    serverStatus = serverStatus,
-                                    customUrls = customUrls,
-                                    onCustomUrlsChange = {
-                                        customUrls = it
-                                        Settings.setCustomModelUrls(context, it)
-                                    },
-                                    onStartServer = { startServer() },
-                                    onStopServer = { stopServer() }
-                                )
+                                AppTab.SETTINGS -> Box(Modifier.padding(16.dp)) {
+                                    SettingsTab(
+                                        context = context,
+                                        serverStatus = serverStatus,
+                                        customUrls = customUrls,
+                                        onCustomUrlsChange = {
+                                            customUrls = it
+                                            Settings.setCustomModelUrls(context, it)
+                                        },
+                                        onStartServer = { startServer() },
+                                        onStopServer = { stopServer() }
+                                    )
+                                }
                             }
                         }
                     }
@@ -429,12 +454,6 @@ class MainActivity : ComponentActivity() {
         stopService(Intent(this, LLMServerService::class.java))
     }
 
-    /**
-     * Returns `true` on hash match, `false` on mismatch (file deleted as a
-     * side effect), `null` when no expected hash is recorded (custom URLs).
-     * Caller is responsible for surfacing the mismatch to the user and
-     * removing the entry from in-memory `existingModels`.
-     */
     private fun verifyDownloadedModel(filename: String): Boolean? {
         val expected = AVAILABLE_MODELS.firstOrNull { it.filename == filename }?.sha256
         if (expected == null) {
@@ -464,6 +483,149 @@ class MainActivity : ComponentActivity() {
             false
         }
     }
+}
+
+/**
+ * Compact single-line top app bar. Leading status dot, middle-truncated URL
+ * title (italic placeholder when server is stopped/starting), and contextual
+ * trailing actions:
+ *
+ *  - Chat tab: Tune (system prompt) + Refresh (clear chat).
+ *  - All other tabs: Copy URL.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CompactAppBar(
+    serverStatus: ServerState.Status,
+    serverUrl: String?,
+    onCopyUrl: () -> Unit,
+    activeTab: AppTab,
+    onOpenSystemPrompt: () -> Unit,
+    onClearChat: () -> Unit,
+) {
+    CenterAlignedTopAppBar(
+        title = {
+            val (label, italic) = when {
+                serverStatus == ServerState.Status.RUNNING && serverUrl != null ->
+                    serverUrl to false
+                serverStatus == ServerState.Status.STARTING ->
+                    stringResource(R.string.status_starting) to true
+                serverStatus == ServerState.Status.ERROR ->
+                    stringResource(R.string.status_error) to true
+                else ->
+                    stringResource(R.string.status_stopped) to true
+            }
+            val canCopy = serverStatus == ServerState.Status.RUNNING && serverUrl != null
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = middleEllipsize(label, maxChars = 32),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (italic) MaterialTheme.colorScheme.onSurfaceVariant
+                            else MaterialTheme.colorScheme.onSurface,
+                    fontStyle = if (italic) FontStyle.Italic else FontStyle.Normal,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (canCopy && activeTab != AppTab.CHAT) {
+                    Spacer(Modifier.width(6.dp))
+                    Icon(
+                        imageVector = Icons.Outlined.ContentCopy,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+        },
+        navigationIcon = {
+            Box(
+                modifier = Modifier
+                    .size(48.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                StatusDot(status = serverStatus)
+            }
+        },
+        actions = {
+            if (activeTab == AppTab.CHAT) {
+                IconButton(onClick = onOpenSystemPrompt) {
+                    Icon(
+                        imageVector = Icons.Outlined.Tune,
+                        contentDescription = "Edit system prompt",
+                    )
+                }
+                IconButton(onClick = onClearChat) {
+                    Icon(
+                        imageVector = Icons.Outlined.Refresh,
+                        contentDescription = "Clear chat",
+                    )
+                }
+            } else {
+                IconButton(
+                    onClick = onCopyUrl,
+                    enabled = serverStatus == ServerState.Status.RUNNING && serverUrl != null,
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.ContentCopy,
+                        contentDescription = stringResource(R.string.action_copy_url),
+                    )
+                }
+            }
+        },
+        colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+            containerColor = MaterialTheme.colorScheme.surface,
+        ),
+    )
+}
+
+@Composable
+private fun AppNavigationBar(
+    activeTab: AppTab,
+    onTabSelected: (AppTab) -> Unit,
+) {
+    NavigationBar(
+        containerColor = MaterialTheme.colorScheme.surface,
+    ) {
+        AppTab.values().forEach { tab ->
+            NavigationBarItem(
+                selected = activeTab == tab,
+                onClick = { onTabSelected(tab) },
+                icon = { Icon(iconForTab(tab), contentDescription = null) },
+                label = {
+                    Text(
+                        text = stringResource(tab.labelRes),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+            )
+        }
+    }
+}
+
+private fun iconForTab(tab: AppTab): ImageVector = when (tab) {
+    AppTab.MODELS -> Icons.Outlined.FolderOpen
+    AppTab.DASHBOARD -> Icons.Outlined.BarChart
+    AppTab.CONSOLE -> Icons.Outlined.Terminal
+    AppTab.CHAT -> Icons.AutoMirrored.Outlined.Chat
+    AppTab.SETTINGS -> Icons.Outlined.Settings
+}
+
+/**
+ * Cheap middle-ellipsis for the app-bar URL. Compose doesn't offer
+ * `TextOverflow.MiddleEllipsis` natively (it's experimental as of Compose
+ * 1.7), so we do it manually on the string. Truncates only when the input
+ * exceeds [maxChars], preserving the prefix (scheme://host) and the suffix
+ * (port + path).
+ */
+private fun middleEllipsize(s: String, maxChars: Int): String {
+    if (s.length <= maxChars) return s
+    val keep = maxChars - 1 // one char for the ellipsis
+    val head = keep / 2
+    val tail = keep - head
+    return s.substring(0, head) + "…" + s.substring(s.length - tail)
 }
 
 private inline fun refreshExistingModels(

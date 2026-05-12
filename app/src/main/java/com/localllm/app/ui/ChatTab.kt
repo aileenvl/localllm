@@ -1,52 +1,67 @@
 package com.localllm.app.ui
 
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Send
+import androidx.compose.material.icons.outlined.ArrowDropDown
+import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Bolt
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Stop
-import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.localllm.app.AVAILABLE_MODELS
 import com.localllm.app.LogManager
 import com.localllm.app.R
@@ -92,141 +107,87 @@ fun ChatTab(
     chatListState: LazyListState,
     tokenRate: Double = 0.0,
     tokenCount: Int = 0,
-    streamElapsedMs: Long = 0L
+    streamElapsedMs: Long = 0L,
+    /** Increment to open the system-prompt bottom sheet (driven by the app-bar Tune icon). */
+    openSystemPromptTrigger: Int = 0,
+    /** Increment to clear all chat messages (driven by the app-bar Refresh icon). */
+    clearChatTrigger: Int = 0,
+    onClearChat: () -> Unit = {},
 ) {
-    Column(modifier = Modifier.fillMaxSize()) {
-        if (existingModels.isEmpty()) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(stringResource(R.string.chat_needs_model), color = MaterialTheme.colorScheme.error)
-            }
-            return@Column
-        }
+    val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
 
-        var expanded by remember { mutableStateOf(false) }
-        ExposedDropdownMenuBox(
-            expanded = expanded,
-            onExpandedChange = { expanded = !expanded },
-            modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp)
-        ) {
-            OutlinedTextField(
-                value = displayLabelFor(selectedModel),
-                onValueChange = {},
-                readOnly = true,
-                label = { Text(stringResource(R.string.chat_active_model)) },
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                modifier = Modifier.menuAnchor().fillMaxWidth(),
-                colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors()
-            )
-            ExposedDropdownMenu(
-                expanded = expanded,
-                onDismissRequest = { expanded = false }
-            ) {
-                existingModels.forEach { modelName ->
-                    DropdownMenuItem(
-                        text = { Text(displayLabelFor(modelName)) },
-                        onClick = {
-                            onModelChange(modelName.removeSuffix(".litertlm").removeSuffix(".task"))
-                            expanded = false
-                        }
-                    )
-                }
-            }
-        }
-
-        // Live streaming subtitle: only visible while a request is in flight.
-        if (isChatting) {
-            val subtitle = if (streamElapsedMs > 200L && tokenCount > 0) {
-                "streaming — %.1f tok/s · %d tokens".format(tokenRate, tokenCount)
-            } else {
-                "streaming…"
-            }
+    if (existingModels.isEmpty()) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(
-                text = subtitle,
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.secondary,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 4.dp, bottom = 4.dp)
-                    .semantics { contentDescription = subtitle }
+                stringResource(R.string.chat_needs_model),
+                color = MaterialTheme.colorScheme.error,
             )
         }
+        return
+    }
 
-        // Collapsible system prompt section, with rotating chevron-ish icon
-        // (we rotate the Tune icon 90° when expanded for a tactile feel).
-        var systemPromptVisible by remember { mutableStateOf(false) }
-        var systemPrompt by remember { mutableStateOf("") }
-        val rotation by animateFloatAsState(
-            targetValue = if (systemPromptVisible) 90f else 0f,
-            animationSpec = tween(durationMillis = 200),
-            label = "system-prompt-toggle"
+    // System-prompt state. Sheet is opened either by tapping the inline
+    // indicator strip's edit icon, or by the Tune action in the app bar via
+    // [openSystemPromptTrigger].
+    var systemPrompt by remember { mutableStateOf("") }
+    var sheetOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(openSystemPromptTrigger) {
+        if (openSystemPromptTrigger > 0) sheetOpen = true
+    }
+    LaunchedEffect(clearChatTrigger) {
+        if (clearChatTrigger > 0) onClearChat()
+    }
+
+    // Track streaming delta for the assistant fade-in animation. Mirrors v1.
+    val lastAssistantLengthState = remember { mutableStateOf(0) }
+    val lastDeltaState = remember { mutableStateOf(0) }
+    val streamingAssistantIndex = chatMessages.indexOfLast { it.role == "assistant" }
+    val currentAssistantLength =
+        if (isChatting && streamingAssistantIndex >= 0) chatMessages[streamingAssistantIndex].content.length
+        else 0
+    SideEffect {
+        if (isChatting && currentAssistantLength > lastAssistantLengthState.value) {
+            lastDeltaState.value = currentAssistantLength - lastAssistantLengthState.value
+            lastAssistantLengthState.value = currentAssistantLength
+        } else if (!isChatting) {
+            lastAssistantLengthState.value = 0
+            lastDeltaState.value = 0
+        }
+    }
+    val lastDelta = lastDeltaState.value
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(top = 8.dp)
+    ) {
+        // Compact header row: model selector chip + (while streaming) tok/s chip.
+        ChatHeaderRow(
+            existingModels = existingModels,
+            selectedModel = selectedModel,
+            onModelChange = onModelChange,
+            isChatting = isChatting,
+            tokenRate = tokenRate,
+            tokenCount = tokenCount,
+            streamElapsedMs = streamElapsedMs,
         )
-        val systemToggleLabel = if (systemPromptVisible) {
-            stringResource(R.string.chat_hide_system_prompt)
-        } else {
-            stringResource(R.string.chat_show_system_prompt)
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            TextButton(
-                onClick = { systemPromptVisible = !systemPromptVisible },
-                modifier = Modifier
-                    .defaultMinSize(minHeight = 48.dp)
-                    .semantics { contentDescription = systemToggleLabel }
-            ) {
-                Icon(
-                    imageVector = Icons.Outlined.Tune,
-                    contentDescription = null,
-                    modifier = Modifier
-                        .size(18.dp)
-                        .rotate(rotation)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(systemToggleLabel)
-            }
-        }
-        if (systemPromptVisible) {
-            OutlinedTextField(
-                value = systemPrompt,
-                onValueChange = { systemPrompt = it },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp),
-                label = { Text(stringResource(R.string.chat_system_prompt_label)) },
-                placeholder = { Text(stringResource(R.string.chat_system_prompt_placeholder)) },
-                maxLines = 4
+
+        // Persistent system-prompt indicator strip, only when set.
+        if (systemPrompt.isNotBlank()) {
+            SystemPromptStrip(
+                text = systemPrompt,
+                onEdit = { sheetOpen = true },
             )
         }
 
-        // Track the size of the last appended chunk on the streaming assistant
-        // message so ChatBubble can fade the trailing delta in. Uses a
-        // SideEffect to mutate after composition completes, avoiding the
-        // "writing state during composition" footgun.
-        val lastAssistantLengthState = remember { androidx.compose.runtime.mutableStateOf(0) }
-        val lastDeltaState = remember { androidx.compose.runtime.mutableStateOf(0) }
-        val streamingAssistantIndex = chatMessages.indexOfLast { it.role == "assistant" }
-        val currentAssistantLength =
-            if (isChatting && streamingAssistantIndex >= 0) chatMessages[streamingAssistantIndex].content.length
-            else 0
-        androidx.compose.runtime.SideEffect {
-            if (isChatting && currentAssistantLength > lastAssistantLengthState.value) {
-                lastDeltaState.value = currentAssistantLength - lastAssistantLengthState.value
-                lastAssistantLengthState.value = currentAssistantLength
-            } else if (!isChatting) {
-                lastAssistantLengthState.value = 0
-                lastDeltaState.value = 0
-            }
-        }
-        val lastDelta = lastDeltaState.value
-
+        // Message list.
         LazyColumn(
             state = chatListState,
             modifier = Modifier
                 .weight(1f)
-                .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surface, shape = MaterialTheme.shapes.medium)
-                .padding(8.dp)
+                .fillMaxWidth(),
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
         ) {
             if (chatMessages.isEmpty()) {
                 item {
@@ -234,72 +195,298 @@ fun ChatTab(
                 }
             }
             itemsIndexed(chatMessages) { index, msg ->
-                val isStreaming = isChatting && index == streamingAssistantIndex && msg.role == "assistant"
+                val isStreaming =
+                    isChatting && index == streamingAssistantIndex && msg.role == "assistant"
                 ChatBubble(
                     msg = msg,
                     isStreaming = isStreaming,
-                    lastDeltaLength = if (isStreaming) lastDelta else 0
+                    lastDeltaLength = if (isStreaming) lastDelta else 0,
                 )
             }
             if (isChatting) {
                 item {
                     CircularProgressIndicator(
-                        modifier = Modifier.size(24.dp).padding(8.dp),
-                        strokeWidth = 2.dp
+                        modifier = Modifier
+                            .size(24.dp)
+                            .padding(8.dp),
+                        strokeWidth = 2.dp,
                     )
                 }
             }
         }
 
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+        // Input row.
+        ChatInputBar(
+            value = chatInput,
+            onValueChange = onInputChange,
+            isChatting = isChatting,
+            onSend = {
+                onSend(systemPrompt)
+                focusManager.clearFocus()
+            },
+            onStop = onStop,
+        )
+    }
+
+    if (sheetOpen) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { sheetOpen = false },
+            sheetState = sheetState,
         ) {
-            OutlinedTextField(
-                value = chatInput,
-                onValueChange = onInputChange,
-                modifier = Modifier.weight(1f),
-                placeholder = { Text(stringResource(R.string.chat_placeholder)) },
-                enabled = !isChatting,
-                maxLines = 3
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            if (isChatting) {
-                Button(
-                    onClick = onStop,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.errorContainer,
-                        contentColor = MaterialTheme.colorScheme.onErrorContainer
-                    ),
-                    modifier = Modifier
-                        .heightIn(min = 48.dp)
-                        .semantics { contentDescription = "Stop streaming" }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 16.dp)
+                    .imePadding(),
+            ) {
+                Text(
+                    text = stringResource(R.string.chat_system_prompt_label),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.size(12.dp))
+                OutlinedTextField(
+                    value = systemPrompt,
+                    onValueChange = { systemPrompt = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = {
+                        Text(stringResource(R.string.chat_system_prompt_placeholder))
+                    },
+                    maxLines = 8,
+                )
+                Spacer(Modifier.size(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
                 ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Stop,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(stringResource(R.string.chat_stop))
+                    Button(onClick = { scope.launch { sheetOpen = false } }) {
+                        Text("Save")
+                    }
                 }
-            } else {
-                Button(
-                    onClick = { onSend(systemPrompt) },
-                    enabled = chatInput.isNotBlank(),
-                    modifier = Modifier
-                        .heightIn(min = 48.dp)
-                        .semantics { contentDescription = "Send message" }
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Outlined.Send,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
+                Spacer(Modifier.size(8.dp))
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChatHeaderRow(
+    existingModels: Set<String>,
+    selectedModel: String,
+    onModelChange: (String) -> Unit,
+    isChatting: Boolean,
+    tokenRate: Double,
+    tokenCount: Int,
+    streamElapsedMs: Long,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box {
+            AssistChip(
+                onClick = { menuOpen = true },
+                label = {
+                    Text(
+                        text = displayLabelFor(selectedModel),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(stringResource(R.string.chat_send))
+                },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Outlined.AutoAwesome,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                },
+                trailingIcon = {
+                    Icon(
+                        imageVector = Icons.Outlined.ArrowDropDown,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                },
+            )
+            DropdownMenu(
+                expanded = menuOpen,
+                onDismissRequest = { menuOpen = false },
+            ) {
+                existingModels.forEach { modelName ->
+                    DropdownMenuItem(
+                        text = { Text(displayLabelFor(modelName)) },
+                        onClick = {
+                            onModelChange(
+                                modelName.removeSuffix(".litertlm").removeSuffix(".task")
+                            )
+                            menuOpen = false
+                        },
+                    )
                 }
             }
+        }
+
+        if (isChatting) {
+            Spacer(Modifier.width(8.dp))
+            val label = if (streamElapsedMs > 200L && tokenCount > 0) {
+                "%.1f tok/s · %d".format(tokenRate, tokenCount)
+            } else {
+                "streaming…"
+            }
+            AssistChip(
+                onClick = {},
+                label = {
+                    Text(
+                        text = label,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Outlined.Bolt,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun SystemPromptStrip(
+    text: String,
+    onEdit: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onEdit)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = text,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(8.dp))
+            Icon(
+                imageVector = Icons.Outlined.Edit,
+                contentDescription = "Edit system prompt",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ChatInputBar(
+    value: String,
+    onValueChange: (String) -> Unit,
+    isChatting: Boolean,
+    onSend: () -> Unit,
+    onStop: () -> Unit,
+) {
+    val placeholder = stringResource(R.string.chat_placeholder)
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 12.dp)
+            .imePadding(),
+        tonalElevation = 2.dp,
+        shape = RoundedCornerShape(28.dp),
+        color = MaterialTheme.colorScheme.surface,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            Spacer(Modifier.width(8.dp))
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 48.dp)
+                    .padding(vertical = 12.dp),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                if (value.isEmpty()) {
+                    Text(
+                        text = placeholder,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                BasicTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    enabled = !isChatting,
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(
+                        color = MaterialTheme.colorScheme.onSurface,
+                    ),
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                    maxLines = 5,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            SendStopButton(
+                isChatting = isChatting,
+                canSend = value.isNotBlank(),
+                onSend = onSend,
+                onStop = onStop,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SendStopButton(
+    isChatting: Boolean,
+    canSend: Boolean,
+    onSend: () -> Unit,
+    onStop: () -> Unit,
+) {
+    val bg = if (isChatting) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+    val fg = if (isChatting) MaterialTheme.colorScheme.onError else MaterialTheme.colorScheme.onPrimary
+    val cd = if (isChatting) "Stop streaming" else "Send message"
+    Box(
+        modifier = Modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .background(bg)
+            .semantics { contentDescription = cd },
+        contentAlignment = Alignment.Center,
+    ) {
+        IconButton(
+            onClick = { if (isChatting) onStop() else if (canSend) onSend() },
+            enabled = isChatting || canSend,
+        ) {
+            Icon(
+                imageVector = if (isChatting) Icons.Outlined.Stop else Icons.AutoMirrored.Outlined.Send,
+                contentDescription = null,
+                tint = fg,
+                modifier = Modifier.size(22.dp),
+            )
         }
     }
 }
