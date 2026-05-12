@@ -23,6 +23,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import com.localllm.app.R
 import com.localllm.app.ServerState
 import com.localllm.app.Settings
+import com.localllm.app.SettingsRepository
 
 @Composable
 fun SettingsTab(
@@ -47,25 +49,47 @@ fun SettingsTab(
     onStopServer: () -> Unit
 ) {
     val scroll = rememberScrollState()
+    val repo = remember(context) { SettingsRepository.get(context) }
 
-    var port by remember { mutableStateOf(Settings.port(context).toString()) }
-    var maxTokens by remember { mutableStateOf(Settings.maxTokens(context).toString()) }
-    var temperature by remember { mutableStateOf(Settings.temperature(context)) }
-    var topK by remember { mutableStateOf(Settings.topK(context)) }
-    var bindLan by remember { mutableStateOf(Settings.bindLan(context)) }
-    var startOnBoot by remember { mutableStateOf(Settings.startOnBoot(context)) }
-    var autostart by remember { mutableStateOf(Settings.autostart(context)) }
+    // Observe each preference as a StateFlow — no more disk reads on recompose.
+    val portValue by repo.port.collectAsState()
+    val maxTokensValue by repo.maxTokens.collectAsState()
+    val temperatureValue by repo.temperature.collectAsState()
+    val topKValue by repo.topK.collectAsState()
+    val bindLan by repo.bindLan.collectAsState()
+    val startOnBoot by repo.startOnBoot.collectAsState()
+    val autostart by repo.autostart.collectAsState()
+
+    val requestTimeoutMs by repo.requestTimeoutMs.collectAsState()
+    val maxQueueDepthValue by repo.maxQueueDepth.collectAsState()
+    val maxPromptCharsValue by repo.maxPromptChars.collectAsState()
+    val apiKey by repo.apiKey.collectAsState()
+    val keepAwake by repo.keepAwake.collectAsState()
+    val idleEvictMs by repo.idleEvictMs.collectAsState()
+    val idleStopMs by repo.idleStopMs.collectAsState()
+    val backend by repo.backend.collectAsState()
+    val allowCors by repo.allowCors.collectAsState()
+
+    // For text fields whose user-facing value is a string buffer separate from
+    // the stored numeric value (mid-typing the field may hold something like
+    // "" or "12" that doesn't yet parse to a valid clamped int), keep a local
+    // editable mirror seeded from the flow. We deliberately do NOT re-sync
+    // the buffer back from the flow on every emission — otherwise typing "9"
+    // (port 9) would immediately get clamped to "1024" mid-keystroke.
+    var port by remember { mutableStateOf(portValue.toString()) }
+    var maxTokens by remember { mutableStateOf(maxTokensValue.toString()) }
     var urlsText by remember { mutableStateOf(customUrls.joinToString("\n")) }
+    var requestTimeoutSec by remember { mutableStateOf((requestTimeoutMs / 1000).toString()) }
+    var maxQueueDepth by remember { mutableStateOf(maxQueueDepthValue.toString()) }
+    var maxPromptChars by remember { mutableStateOf(maxPromptCharsValue.toString()) }
+    var idleEvictMin by remember { mutableStateOf((idleEvictMs / 60_000L).toString()) }
+    var idleStopMin by remember { mutableStateOf((idleStopMs / 60_000L).toString()) }
 
-    var requestTimeoutSec by remember { mutableStateOf((Settings.requestTimeoutMs(context) / 1000).toString()) }
-    var maxQueueDepth by remember { mutableStateOf(Settings.maxQueueDepth(context).toString()) }
-    var maxPromptChars by remember { mutableStateOf(Settings.maxPromptChars(context).toString()) }
-    var apiKey by remember { mutableStateOf(Settings.apiKey(context)) }
-    var keepAwake by remember { mutableStateOf(Settings.keepAwake(context)) }
-    var idleEvictMin by remember { mutableStateOf((Settings.idleEvictMs(context) / 60_000L).toString()) }
-    var idleStopMin by remember { mutableStateOf((Settings.idleStopMs(context) / 60_000L).toString()) }
-    var backend by remember { mutableStateOf(Settings.backend(context)) }
-    var allowCors by remember { mutableStateOf(Settings.allowCors(context)) }
+    // Slider drags need a local mirror so the thumb tracks the finger without
+    // every position change forcing a disk write. We push to the repo only on
+    // release (onValueChangeFinished), matching the original semantics.
+    var temperature by remember { mutableStateOf(temperatureValue) }
+    var topK by remember { mutableStateOf(topKValue) }
 
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(scroll),
@@ -97,7 +121,7 @@ fun SettingsTab(
                 onValueChange = {
                     val sanitized = it.filter { c -> c.isDigit() }.take(5)
                     port = sanitized
-                    sanitized.toIntOrNull()?.let { v -> Settings.setPort(context, v) }
+                    sanitized.toIntOrNull()?.let { v -> repo.setPort(v) }
                 },
                 label = stringResource(R.string.settings_port)
             )
@@ -105,19 +129,13 @@ fun SettingsTab(
                 label = stringResource(R.string.settings_bind_lan),
                 subtitle = stringResource(R.string.settings_bind_lan_subtitle),
                 checked = bindLan,
-                onCheckedChange = {
-                    bindLan = it
-                    Settings.setBindLan(context, it)
-                }
+                onCheckedChange = { repo.setBindLan(it) }
             )
             SettingRow(
                 label = stringResource(R.string.settings_cors),
                 subtitle = stringResource(R.string.settings_cors_subtitle),
                 checked = allowCors,
-                onCheckedChange = {
-                    allowCors = it
-                    Settings.setAllowCors(context, it)
-                }
+                onCheckedChange = { repo.setAllowCors(it) }
             )
         }
 
@@ -127,10 +145,7 @@ fun SettingsTab(
             Text(stringResource(R.string.settings_backend), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 4.dp))
             BackendSelector(
                 selected = backend,
-                onSelect = {
-                    backend = it
-                    Settings.setBackend(context, it)
-                }
+                onSelect = { repo.setBackend(it) }
             )
             HintText(stringResource(R.string.settings_backend_hint))
 
@@ -139,7 +154,7 @@ fun SettingsTab(
                 onValueChange = {
                     val sanitized = it.filter { c -> c.isDigit() }.take(5)
                     maxTokens = sanitized
-                    sanitized.toIntOrNull()?.let { v -> Settings.setMaxTokens(context, v) }
+                    sanitized.toIntOrNull()?.let { v -> repo.setMaxTokens(v) }
                 },
                 label = stringResource(R.string.settings_max_tokens)
             )
@@ -147,7 +162,7 @@ fun SettingsTab(
             Slider(
                 value = temperature,
                 onValueChange = { temperature = it },
-                onValueChangeFinished = { Settings.setTemperature(context, temperature) },
+                onValueChangeFinished = { repo.setTemperature(temperature) },
                 valueRange = 0f..2f,
                 steps = 39
             )
@@ -155,7 +170,7 @@ fun SettingsTab(
             Slider(
                 value = topK.toFloat(),
                 onValueChange = { topK = it.toInt() },
-                onValueChangeFinished = { Settings.setTopK(context, topK) },
+                onValueChangeFinished = { repo.setTopK(topK) },
                 valueRange = 1f..100f,
                 steps = 98
             )
@@ -166,19 +181,13 @@ fun SettingsTab(
                 label = stringResource(R.string.settings_boot),
                 subtitle = stringResource(R.string.settings_boot_subtitle),
                 checked = startOnBoot,
-                onCheckedChange = {
-                    startOnBoot = it
-                    Settings.setStartOnBoot(context, it)
-                }
+                onCheckedChange = { repo.setStartOnBoot(it) }
             )
             SettingRow(
                 label = stringResource(R.string.settings_autostart),
                 subtitle = stringResource(R.string.settings_autostart_subtitle),
                 checked = autostart,
-                onCheckedChange = {
-                    autostart = it
-                    Settings.setAutostart(context, it)
-                }
+                onCheckedChange = { repo.setAutostart(it) }
             )
         }
 
@@ -189,7 +198,7 @@ fun SettingsTab(
                 onValueChange = {
                     val sanitized = it.filter { c -> c.isDigit() }.take(4)
                     requestTimeoutSec = sanitized
-                    sanitized.toLongOrNull()?.let { v -> Settings.setRequestTimeoutMs(context, v * 1000L) }
+                    sanitized.toLongOrNull()?.let { v -> repo.setRequestTimeoutMs(v * 1000L) }
                 },
                 label = stringResource(R.string.settings_timeout)
             )
@@ -198,7 +207,7 @@ fun SettingsTab(
                 onValueChange = {
                     val sanitized = it.filter { c -> c.isDigit() }.take(3)
                     maxQueueDepth = sanitized
-                    sanitized.toIntOrNull()?.let { v -> Settings.setMaxQueueDepth(context, v) }
+                    sanitized.toIntOrNull()?.let { v -> repo.setMaxQueueDepth(v) }
                 },
                 label = stringResource(R.string.settings_queue_depth)
             )
@@ -207,7 +216,7 @@ fun SettingsTab(
                 onValueChange = {
                     val sanitized = it.filter { c -> c.isDigit() }.take(8)
                     maxPromptChars = sanitized
-                    sanitized.toIntOrNull()?.let { v -> Settings.setMaxPromptChars(context, v) }
+                    sanitized.toIntOrNull()?.let { v -> repo.setMaxPromptChars(v) }
                 },
                 label = stringResource(R.string.settings_prompt_chars)
             )
@@ -220,7 +229,7 @@ fun SettingsTab(
                 onValueChange = {
                     val sanitized = it.filter { c -> c.isDigit() }.take(4)
                     idleEvictMin = sanitized
-                    sanitized.toLongOrNull()?.let { v -> Settings.setIdleEvictMs(context, v * 60_000L) }
+                    sanitized.toLongOrNull()?.let { v -> repo.setIdleEvictMs(v * 60_000L) }
                 },
                 label = stringResource(R.string.settings_idle_evict)
             )
@@ -229,7 +238,7 @@ fun SettingsTab(
                 onValueChange = {
                     val sanitized = it.filter { c -> c.isDigit() }.take(4)
                     idleStopMin = sanitized
-                    sanitized.toLongOrNull()?.let { v -> Settings.setIdleStopMs(context, v * 60_000L) }
+                    sanitized.toLongOrNull()?.let { v -> repo.setIdleStopMs(v * 60_000L) }
                 },
                 label = stringResource(R.string.settings_idle_stop)
             )
@@ -237,10 +246,7 @@ fun SettingsTab(
                 label = stringResource(R.string.settings_keep_awake),
                 subtitle = stringResource(R.string.settings_keep_awake_subtitle),
                 checked = keepAwake,
-                onCheckedChange = {
-                    keepAwake = it
-                    Settings.setKeepAwake(context, it)
-                }
+                onCheckedChange = { repo.setKeepAwake(it) }
             )
         }
 
@@ -248,10 +254,7 @@ fun SettingsTab(
             HintText(stringResource(R.string.settings_security_hint))
             OutlinedTextField(
                 value = apiKey,
-                onValueChange = {
-                    apiKey = it
-                    Settings.setApiKey(context, it)
-                },
+                onValueChange = { repo.setApiKey(it) },
                 label = { Text(stringResource(R.string.settings_api_key)) },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
@@ -262,15 +265,11 @@ fun SettingsTab(
                     val random = java.security.SecureRandom()
                     val bytes = ByteArray(16).also { random.nextBytes(it) }
                     val key = bytes.joinToString("") { "%02x".format(it) }
-                    apiKey = key
-                    Settings.setApiKey(context, key)
+                    repo.setApiKey(key)
                 }) { Text(stringResource(R.string.settings_generate)) }
                 OutlinedButton(
                     enabled = apiKey.isNotEmpty(),
-                    onClick = {
-                        apiKey = ""
-                        Settings.setApiKey(context, "")
-                    }
+                    onClick = { repo.setApiKey("") }
                 ) { Text(stringResource(R.string.settings_clear)) }
             }
         }

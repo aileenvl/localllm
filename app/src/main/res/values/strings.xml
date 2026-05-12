@@ -20,7 +20,7 @@
     <string name="tab_settings">Settings</string>
 
     <!-- Models tab -->
-    <string name="models_import">Import .task file from device</string>
+    <string name="models_import">Import .litertlm file from device</string>
     <string name="models_download">Download</string>
     <string name="models_delete">Delete</string>
     <string name="models_downloading">Downloading: %1$d%%</string>
@@ -113,9 +113,9 @@
     <string name="settings_clear">Clear</string>
 
     <!-- Settings tab — custom URLs -->
-    <string name="settings_urls_hint">One URL per line. Must point at a MediaPipe .task bundle.</string>
+    <string name="settings_urls_hint">One URL per line. Must point at a LiteRT-LM .litertlm bundle.</string>
     <string name="settings_urls_label">URLs</string>
-    <string name="settings_urls_placeholder">https://example.com/my-model.task</string>
+    <string name="settings_urls_placeholder">https://example.com/my-model.litertlm</string>
 
     <!-- Catalog item placeholder -->
     <string name="catalog_custom_description">Custom URL</string>

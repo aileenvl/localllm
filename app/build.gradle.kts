@@ -2,7 +2,6 @@ plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.kotlinAndroid)
     alias(libs.plugins.kotlinCompose)
-    alias(libs.plugins.kotlinSerialization)
 }
 
 android {
@@ -27,11 +26,11 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
     }
     kotlinOptions {
-        jvmTarget = "1.8"
+        jvmTarget = "11"
     }
     buildFeatures {
         compose = true
@@ -66,9 +65,6 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.androidx.lifecycle.runtime.compose)
 
-    // Serialization (Gson is used by Ktor; kotlinx-serialization kept for JSON helpers)
-    implementation(libs.kotlinx.serialization.json)
-
     // Ktor Server (OpenAI-compatible HTTP API)
     implementation(libs.ktor.server.core)
     implementation(libs.ktor.server.netty)
@@ -76,8 +72,8 @@ dependencies {
     implementation(libs.ktor.server.content.negotiation)
     implementation(libs.ktor.serialization.gson)
 
-    // MediaPipe LLM Inference (on-device Gemma)
-    implementation(libs.mediapipe.tasks.genai)
+    // LiteRT-LM (on-device Gemma 4 / 3n via Google's LLM runtime; replaces MediaPipe tasks-genai)
+    implementation(libs.litertlm.android)
 
     // OkHttp for the in-app Chat tab that hits the local server
     implementation(libs.okhttp)

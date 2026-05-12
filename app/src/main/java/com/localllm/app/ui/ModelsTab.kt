@@ -38,11 +38,12 @@ fun ModelsTab(
 ) {
     val customDesc = stringResource(R.string.catalog_custom_description)
     val custom = customUrls.mapNotNull { url ->
-        val fname = url.substringAfterLast('/').takeIf { it.endsWith(".task") }
+        val fname = url.substringAfterLast('/').takeIf { it.endsWith(".litertlm") }
             ?: return@mapNotNull null
+        val bare = fname.removeSuffix(".litertlm")
         ModelInfo(
-            id = fname.removeSuffix(".task"),
-            name = fname.removeSuffix(".task"),
+            id = bare,
+            name = bare,
             description = customDesc,
             url = url,
             filename = fname

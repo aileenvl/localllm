@@ -8,6 +8,13 @@ import android.content.SharedPreferences
  *
  * Single source of truth — both the UI (Settings tab) and the LLMServerService
  * read from here so they can never drift apart.
+ *
+ * As of the StateFlow refactor, this object is a **thin synchronous facade**
+ * over [SettingsRepository]. The repository owns the in-memory
+ * `MutableStateFlow`s and [SharedPreferences] for persistence; the legacy
+ * `Settings.xxx(context)` / `Settings.setXxx(context, value)` API still works
+ * verbatim for callers like [LLMServerService] and [BootReceiver] that run on
+ * background threads and don't care about reactivity.
  */
 object Settings {
     private const val PREFS = "settings"
@@ -54,93 +61,73 @@ object Settings {
     const val DEFAULT_IDLE_EVICT_MS = 5L * 60_000L   // 5 minutes; 0 disables
     const val DEFAULT_IDLE_STOP_MS = 0L               // disabled by default
 
-    fun prefs(context: Context): SharedPreferences =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-
-    fun port(context: Context): Int = prefs(context).getInt(KEY_SERVER_PORT, DEFAULT_PORT)
-    fun setPort(context: Context, value: Int) =
-        prefs(context).edit().putInt(KEY_SERVER_PORT, value.coerceIn(1024, 65535)).apply()
-
-    fun maxTokens(context: Context): Int = prefs(context).getInt(KEY_MAX_TOKENS, DEFAULT_MAX_TOKENS)
-    fun setMaxTokens(context: Context, value: Int) =
-        prefs(context).edit().putInt(KEY_MAX_TOKENS, value.coerceIn(64, 8192)).apply()
-
-    fun temperature(context: Context): Float =
-        prefs(context).getFloat(KEY_TEMPERATURE, DEFAULT_TEMPERATURE)
-    fun setTemperature(context: Context, value: Float) =
-        prefs(context).edit().putFloat(KEY_TEMPERATURE, value.coerceIn(0f, 2f)).apply()
-
-    fun topK(context: Context): Int = prefs(context).getInt(KEY_TOP_K, DEFAULT_TOP_K)
-    fun setTopK(context: Context, value: Int) =
-        prefs(context).edit().putInt(KEY_TOP_K, value.coerceIn(1, 200)).apply()
-
-    fun bindLan(context: Context): Boolean = prefs(context).getBoolean(KEY_BIND_LAN, false)
-    fun setBindLan(context: Context, value: Boolean) =
-        prefs(context).edit().putBoolean(KEY_BIND_LAN, value).apply()
-
-    fun startOnBoot(context: Context): Boolean = prefs(context).getBoolean(KEY_START_ON_BOOT, true)
-    fun setStartOnBoot(context: Context, value: Boolean) =
-        prefs(context).edit().putBoolean(KEY_START_ON_BOOT, value).apply()
-
-    fun autostart(context: Context): Boolean = prefs(context).getBoolean(KEY_AUTOSTART, true)
-    fun setAutostart(context: Context, value: Boolean) =
-        prefs(context).edit().putBoolean(KEY_AUTOSTART, value).apply()
-
-    fun customModelUrls(context: Context): List<String> {
-        val raw = prefs(context).getString(KEY_CUSTOM_MODEL_URLS, "") ?: ""
-        return raw.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
+    /**
+     * Returns the raw [SharedPreferences]. This is the only documented escape
+     * hatch for callers that need direct prefs access (e.g. tests that wipe
+     * state in `@Before`). Because direct edits via this path bypass the
+     * repository's in-memory flows, we reset the repository singleton here —
+     * the next read will re-seed the flows from disk.
+     */
+    fun prefs(context: Context): SharedPreferences {
+        SettingsRepository.resetForTesting()
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     }
 
-    fun setCustomModelUrls(context: Context, urls: List<String>) {
-        prefs(context).edit().putString(KEY_CUSTOM_MODEL_URLS, urls.joinToString("\n")).apply()
-    }
+    private fun repo(context: Context): SettingsRepository = SettingsRepository.get(context)
+
+    fun port(context: Context): Int = repo(context).port.value
+    fun setPort(context: Context, value: Int) = repo(context).setPort(value)
+
+    fun maxTokens(context: Context): Int = repo(context).maxTokens.value
+    fun setMaxTokens(context: Context, value: Int) = repo(context).setMaxTokens(value)
+
+    fun temperature(context: Context): Float = repo(context).temperature.value
+    fun setTemperature(context: Context, value: Float) = repo(context).setTemperature(value)
+
+    fun topK(context: Context): Int = repo(context).topK.value
+    fun setTopK(context: Context, value: Int) = repo(context).setTopK(value)
+
+    fun bindLan(context: Context): Boolean = repo(context).bindLan.value
+    fun setBindLan(context: Context, value: Boolean) = repo(context).setBindLan(value)
+
+    fun startOnBoot(context: Context): Boolean = repo(context).startOnBoot.value
+    fun setStartOnBoot(context: Context, value: Boolean) = repo(context).setStartOnBoot(value)
+
+    fun autostart(context: Context): Boolean = repo(context).autostart.value
+    fun setAutostart(context: Context, value: Boolean) = repo(context).setAutostart(value)
+
+    fun customModelUrls(context: Context): List<String> = repo(context).customModelUrls.value
+
+    fun setCustomModelUrls(context: Context, urls: List<String>) =
+        repo(context).setCustomModelUrls(urls)
 
     fun bindHost(context: Context): String = if (bindLan(context)) "0.0.0.0" else "127.0.0.1"
 
-    fun requestTimeoutMs(context: Context): Long =
-        prefs(context).getLong(KEY_REQUEST_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS)
+    fun requestTimeoutMs(context: Context): Long = repo(context).requestTimeoutMs.value
     fun setRequestTimeoutMs(context: Context, value: Long) =
-        prefs(context).edit().putLong(KEY_REQUEST_TIMEOUT_MS, value.coerceIn(5_000L, 600_000L)).apply()
+        repo(context).setRequestTimeoutMs(value)
 
-    fun maxQueueDepth(context: Context): Int =
-        prefs(context).getInt(KEY_MAX_QUEUE_DEPTH, DEFAULT_MAX_QUEUE_DEPTH)
-    fun setMaxQueueDepth(context: Context, value: Int) =
-        prefs(context).edit().putInt(KEY_MAX_QUEUE_DEPTH, value.coerceIn(1, 100)).apply()
+    fun maxQueueDepth(context: Context): Int = repo(context).maxQueueDepth.value
+    fun setMaxQueueDepth(context: Context, value: Int) = repo(context).setMaxQueueDepth(value)
 
-    fun maxPromptChars(context: Context): Int =
-        prefs(context).getInt(KEY_MAX_PROMPT_CHARS, DEFAULT_MAX_PROMPT_CHARS)
-    fun setMaxPromptChars(context: Context, value: Int) =
-        prefs(context).edit().putInt(KEY_MAX_PROMPT_CHARS, value.coerceIn(512, 2_000_000)).apply()
+    fun maxPromptChars(context: Context): Int = repo(context).maxPromptChars.value
+    fun setMaxPromptChars(context: Context, value: Int) = repo(context).setMaxPromptChars(value)
 
-    fun apiKey(context: Context): String = prefs(context).getString(KEY_API_KEY, "") ?: ""
-    fun setApiKey(context: Context, value: String) =
-        prefs(context).edit().putString(KEY_API_KEY, value.trim()).apply()
+    fun apiKey(context: Context): String = repo(context).apiKey.value
+    fun setApiKey(context: Context, value: String) = repo(context).setApiKey(value)
 
-    fun keepAwake(context: Context): Boolean = prefs(context).getBoolean(KEY_KEEP_AWAKE, true)
-    fun setKeepAwake(context: Context, value: Boolean) =
-        prefs(context).edit().putBoolean(KEY_KEEP_AWAKE, value).apply()
+    fun keepAwake(context: Context): Boolean = repo(context).keepAwake.value
+    fun setKeepAwake(context: Context, value: Boolean) = repo(context).setKeepAwake(value)
 
-    fun idleEvictMs(context: Context): Long =
-        prefs(context).getLong(KEY_IDLE_EVICT_MS, DEFAULT_IDLE_EVICT_MS)
-    fun setIdleEvictMs(context: Context, value: Long) =
-        prefs(context).edit().putLong(KEY_IDLE_EVICT_MS, value.coerceAtLeast(0L)).apply()
+    fun idleEvictMs(context: Context): Long = repo(context).idleEvictMs.value
+    fun setIdleEvictMs(context: Context, value: Long) = repo(context).setIdleEvictMs(value)
 
-    fun idleStopMs(context: Context): Long =
-        prefs(context).getLong(KEY_IDLE_STOP_MS, DEFAULT_IDLE_STOP_MS)
-    fun setIdleStopMs(context: Context, value: Long) =
-        prefs(context).edit().putLong(KEY_IDLE_STOP_MS, value.coerceAtLeast(0L)).apply()
+    fun idleStopMs(context: Context): Long = repo(context).idleStopMs.value
+    fun setIdleStopMs(context: Context, value: Long) = repo(context).setIdleStopMs(value)
 
-    fun backend(context: Context): String =
-        prefs(context).getString(KEY_BACKEND, BACKEND_AUTO) ?: BACKEND_AUTO
-    fun setBackend(context: Context, value: String) {
-        val safe = when (value.uppercase()) {
-            BACKEND_CPU, BACKEND_GPU, BACKEND_AUTO -> value.uppercase()
-            else -> BACKEND_AUTO
-        }
-        prefs(context).edit().putString(KEY_BACKEND, safe).apply()
-    }
+    fun backend(context: Context): String = repo(context).backend.value
+    fun setBackend(context: Context, value: String) = repo(context).setBackend(value)
 
-    fun allowCors(context: Context): Boolean = prefs(context).getBoolean(KEY_ALLOW_CORS, false)
-    fun setAllowCors(context: Context, value: Boolean) =
-        prefs(context).edit().putBoolean(KEY_ALLOW_CORS, value).apply()
+    fun allowCors(context: Context): Boolean = repo(context).allowCors.value
+    fun setAllowCors(context: Context, value: Boolean) = repo(context).setAllowCors(value)
 }
