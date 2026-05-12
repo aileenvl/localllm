@@ -1,0 +1,73 @@
+# Keeps app dependencies, GitHub Actions workflows, and mkdocs docs in
+# sync without flooding the PR queue. Weekly cadence; grouped minor /
+# patch updates so a busy upstream doesn't open ten PRs at once.
+
+version: 2
+updates:
+  # Android app — Gradle catalog + buildscript.
+  - package-ecosystem: "gradle"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "android"
+    groups:
+      # Compose + AndroidX move together; bundle them so we don't get
+      # one PR per artifact in the BOM.
+      androidx-compose:
+        patterns:
+          - "androidx.compose*"
+          - "androidx.activity:activity-compose*"
+          - "androidx.lifecycle:lifecycle-runtime-compose*"
+      kotlin:
+        patterns:
+          - "org.jetbrains.kotlin*"
+          - "org.jetbrains.kotlinx*"
+      ktor:
+        patterns:
+          - "io.ktor:*"
+      tests:
+        patterns:
+          - "junit:*"
+          - "org.robolectric:*"
+          - "androidx.test*"
+    ignore:
+      # LiteRT-LM is API-fragile and a major upgrade requires manual
+      # validation against an actual model. Watch the upstream
+      # changelog and bump manually.
+      - dependency-name: "com.google.ai.edge.litertlm:litertlm-android"
+
+  # CI workflow actions (actions/checkout, actions/setup-java, etc.).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ci"
+    groups:
+      actions:
+        patterns:
+          - "actions/*"
+
+  # mkdocs site dependencies.
+  - package-ecosystem: "pip"
+    directory: "/docs"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "docs"
