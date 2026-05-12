@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    No automatic backup. SharedPreferences holds the API key and downloaded
+    model files in external storage shouldn't roundtrip via Google's backup
+    service.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="." />
+    <exclude domain="external" path="." />
+    <exclude domain="file" path="." />
+</full-backup-content>

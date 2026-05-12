@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App identity -->
+    <string name="app_name">LocalLLM</string>
+    <string name="app_title">LocalLLM Edge Server</string>
+
+    <!-- Header / status -->
+    <string name="status_starting">Starting…</string>
+    <string name="status_stopped">Stopped</string>
+    <string name="status_error">Error — check Console</string>
+    <string name="status_live_prefix">LIVE</string>
+    <string name="action_copy_url">Copy URL</string>
+    <string name="toast_url_copied">Copied %1$s</string>
+
+    <!-- Tab labels -->
+    <string name="tab_catalog">Catalog</string>
+    <string name="tab_dashboard">Dashboard</string>
+    <string name="tab_console">Console</string>
+    <string name="tab_chat">Chat</string>
+    <string name="tab_settings">Settings</string>
+
+    <!-- Models tab -->
+    <string name="models_import">Import .task file from device</string>
+    <string name="models_download">Download</string>
+    <string name="models_delete">Delete</string>
+    <string name="models_downloading">Downloading: %1$d%%</string>
+
+    <!-- Chat tab -->
+    <string name="chat_needs_model">Download or import a model first.</string>
+    <string name="chat_active_model">Active Model</string>
+    <string name="chat_placeholder">Ask something…</string>
+    <string name="chat_send">Send</string>
+    <string name="chat_empty">Send a message to test the local server.</string>
+
+    <!-- Dashboard tab -->
+    <string name="dash_live">Live</string>
+    <string name="dash_idle">Idle. No request running.</string>
+    <string name="dash_waiting">Waiting (%1$d)</string>
+    <string name="dash_queue_label">queue: %1$d</string>
+    <string name="dash_stats">Stats</string>
+    <string name="dash_reset">Reset</string>
+    <string name="dash_history">History (%1$d)</string>
+    <string name="dash_clear">Clear</string>
+    <string name="dash_no_history">No completed requests yet.</string>
+    <string name="dash_stat_total">Total</string>
+    <string name="dash_stat_ok">OK</string>
+    <string name="dash_stat_err">Err</string>
+    <string name="dash_stat_avg_latency">Avg latency</string>
+    <string name="dash_stat_avg_tokens">Avg tok/s</string>
+    <string name="dash_stat_err_rate">Err rate</string>
+    <string name="dash_state_ok">OK</string>
+    <string name="dash_state_err">ERR</string>
+    <string name="dash_state_cxl">CXL</string>
+
+    <!-- Settings tab — sections -->
+    <string name="settings_section_server">Server</string>
+    <string name="settings_section_network">Network</string>
+    <string name="settings_section_inference">Inference defaults</string>
+    <string name="settings_section_startup">Startup</string>
+    <string name="settings_section_limits">Request limits</string>
+    <string name="settings_section_background">Background</string>
+    <string name="settings_section_security">Security</string>
+    <string name="settings_section_custom_urls">Custom model URLs</string>
+
+    <!-- Settings tab — server controls -->
+    <string name="settings_start">Start</string>
+    <string name="settings_retry">Retry</string>
+    <string name="settings_stop">Stop</string>
+    <string name="settings_restart_hint">Changes to port or bind address take effect after Stop → Start.</string>
+
+    <!-- Settings tab — network -->
+    <string name="settings_port">Port</string>
+    <string name="settings_bind_lan">Bind to LAN (0.0.0.0)</string>
+    <string name="settings_bind_lan_subtitle">Off: localhost only. On: reachable from other devices on Wi-Fi.</string>
+    <string name="settings_cors">Enable CORS</string>
+    <string name="settings_cors_subtitle">Required only for browser-based clients. Native apps and curl don\'t need this. Off is safer.</string>
+
+    <!-- Settings tab — inference defaults -->
+    <string name="settings_inference_hint">Used when the request doesn\'t specify temperature, top_k, or max_tokens.</string>
+    <string name="settings_backend">Backend</string>
+    <string name="settings_backend_hint">Auto lets MediaPipe pick the best backend. On Pixel 10 / Tensor G5 that routes to the NPU when the model supports it. Changing the backend rebuilds the engine on the next request.</string>
+    <string name="settings_backend_auto">Auto</string>
+    <string name="settings_backend_cpu">CPU</string>
+    <string name="settings_backend_gpu">GPU</string>
+    <string name="settings_max_tokens">Max tokens</string>
+    <string name="settings_temperature">Temperature: %1$s</string>
+    <string name="settings_top_k">Top-K: %1$d</string>
+
+    <!-- Settings tab — startup -->
+    <string name="settings_boot">Start on device boot</string>
+    <string name="settings_boot_subtitle">Launch the server automatically when the phone powers on.</string>
+    <string name="settings_autostart">Autostart on app open</string>
+    <string name="settings_autostart_subtitle">Start the server when the app launches (if a model is present).</string>
+
+    <!-- Settings tab — limits -->
+    <string name="settings_limits_hint">Backpressure for misbehaving clients. 429 when queue is full, 413 for oversized prompts, 408 on timeout.</string>
+    <string name="settings_timeout">Request timeout (seconds)</string>
+    <string name="settings_queue_depth">Max queue depth</string>
+    <string name="settings_prompt_chars">Max prompt chars</string>
+
+    <!-- Settings tab — background -->
+    <string name="settings_background_hint">Release engines and (optionally) stop the service after a quiet period.</string>
+    <string name="settings_idle_evict">Unload models after (minutes idle, 0 = never)</string>
+    <string name="settings_idle_stop">Auto-stop server after (minutes idle, 0 = never)</string>
+    <string name="settings_keep_awake">Keep CPU awake during inference</string>
+    <string name="settings_keep_awake_subtitle">Holds a partial wake lock while a request is running so the device doesn\'t throttle mid-generation.</string>
+
+    <!-- Settings tab — security -->
+    <string name="settings_security_hint">Optional bearer token. When set, clients must send Authorization: Bearer &lt;key&gt;. Recommended when binding to LAN.</string>
+    <string name="settings_api_key">API key</string>
+    <string name="settings_api_key_placeholder">(empty = auth disabled)</string>
+    <string name="settings_generate">Generate</string>
+    <string name="settings_clear">Clear</string>
+
+    <!-- Settings tab — custom URLs -->
+    <string name="settings_urls_hint">One URL per line. Must point at a MediaPipe .task bundle.</string>
+    <string name="settings_urls_label">URLs</string>
+    <string name="settings_urls_placeholder">https://example.com/my-model.task</string>
+
+    <!-- Catalog item placeholder -->
+    <string name="catalog_custom_description">Custom URL</string>
+
+    <!-- Foreground service notification -->
+    <string name="notif_channel_name">LLM Background Service</string>
+    <string name="notif_title">LocalLLM Server</string>
+    <string name="notif_listening">Listening on %1$s:%2$d</string>
+    <string name="notif_action_stop">Stop</string>
+
+    <!-- Logged events -->
+    <string name="log_imported">Imported %1$s</string>
+    <string name="log_import_failed">Failed to import model</string>
+</resources>
