@@ -46,6 +46,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import com.google.gson.Gson
 import android.util.LruCache
@@ -100,6 +101,10 @@ class LLMServerService : Service() {
                 if (key != null) {
                     val tied = sessions.snapshot().filter { it.value.engineKey == key }.keys
                     tied.forEach { sessions.remove(it) }
+                    // Drop the per-engine "active conversation" tracking entry.
+                    activeConversations.remove(key)?.let { conv ->
+                        try { conv.close() } catch (_: Exception) {}
+                    }
                 }
                 try {
                     oldValue?.engine?.close()
@@ -110,6 +115,15 @@ class LLMServerService : Service() {
             }
         }
     }
+
+    /**
+     * Tracks the single live [Conversation] per engine cache key. LiteRT-LM's
+     * Engine constraint is "at most one conversation per engine at a time"; we
+     * use this map to find and close the prior conversation before constructing
+     * a new one. Distinct from [sessions] (which only tracks *cached* sessioned
+     * conversations) because stateless conversations also need to be tracked.
+     */
+    private val activeConversations = ConcurrentHashMap<String, Conversation>()
 
     /**
      * Cached `Conversation`s keyed by `session_id + engineKey`. Conversations
@@ -802,11 +816,21 @@ class LLMServerService : Service() {
      */
     private fun createConversation(
         engine: Engine,
+        engineKey: String,
         temperature: Float,
         topK: Int,
         systemText: String?,
         initial: List<Message>
     ): Conversation {
+        // LiteRT-LM enforces *one active Conversation per Engine*. If a prior
+        // request's conversation didn't fully release (silent close() failure,
+        // mid-stream cancellation, or just timing of native cleanup) the next
+        // engine.createConversation() throws FAILED_PRECONDITION
+        // "A session already exists". Close any conversation we know about on
+        // this engine before creating a new one — covers both the cached
+        // sessions LRU and the per-engine "currently active" slot we track.
+        purgeConversationsOnEngine(engineKey)
+
         val systemInstruction = systemText?.takeIf { it.isNotBlank() }?.let { Contents.of(it) }
         val priorMessages = initial.map { m ->
             when (m.role) {
@@ -821,7 +845,38 @@ class LLMServerService : Service() {
             emptyList(),                                       // tools
             SamplerConfig(topK, /*topP=*/0.95, temperature.toDouble(), /*seed=*/0)
         )
-        return engine.createConversation(cfg)
+        val conv = try {
+            engine.createConversation(cfg)
+        } catch (e: Exception) {
+            // Defensive: if LiteRT-LM still reports a stale session despite our
+            // pre-purge, force-evict the engine (Engine.close() releases all
+            // native conversation slots) and surface a clear error. Caller may
+            // retry with a fresh getOrCreateEngine pass.
+            if (e.message?.contains("session already exists", ignoreCase = true) == true) {
+                LogManager.w("LLMServerService", "Engine $engineKey stuck with leaked conversation; evicting.")
+                engines.remove(engineKey)
+                throw IllegalStateException("Engine had a stuck conversation; evicted. Please retry the request.", e)
+            }
+            throw e
+        }
+        activeConversations[engineKey] = conv
+        return conv
+    }
+
+    /**
+     * Close every conversation we know about on the given engine — both the
+     * cached sessions in [sessions] and the per-engine "currently active" slot
+     * in [activeConversations]. Idempotent and silently swallows close()
+     * exceptions (the native side may have already cleaned up).
+     */
+    private fun purgeConversationsOnEngine(engineKey: String) {
+        // Evict cached sessions tied to this engine — entryRemoved closes them.
+        val staleKeys = sessions.snapshot().filter { it.value.engineKey == engineKey }.keys
+        staleKeys.forEach { sessions.remove(it) }
+        // Close whatever we last marked as active on this engine.
+        activeConversations.remove(engineKey)?.let { prior ->
+            try { prior.close() } catch (_: Exception) {}
+        }
     }
 
     private data class EngineHandle(val engine: Engine, val cacheKey: String)
@@ -956,7 +1011,7 @@ class LLMServerService : Service() {
 
         // Stateless path.
         if (req.sessionId.isNullOrEmpty()) {
-            val conversation = createConversation(handle.engine, temperature, topK, systemText, prior)
+            val conversation = createConversation(handle.engine, handle.cacheKey, temperature, topK, systemText, prior)
             return ResolvedSession(
                 conversation = conversation,
                 prompt = lastUserPrompt,
@@ -1003,7 +1058,7 @@ class LLMServerService : Service() {
         // Rebuild path — either no cache, sampling params changed, prefix
         // mismatched, or the client added something we can't merge in-place.
         if (cached != null) sessions.remove(cacheKey)
-        val conversation = createConversation(handle.engine, temperature, topK, systemText, prior)
+        val conversation = createConversation(handle.engine, handle.cacheKey, temperature, topK, systemText, prior)
         return ResolvedSession(
             conversation = conversation,
             prompt = lastUserPrompt,
@@ -1030,6 +1085,8 @@ class LLMServerService : Service() {
             seenCount = messages.size,
             createdAt = sessions.get(cacheKey)?.createdAt ?: System.currentTimeMillis()
         ))
+        // Marker so the next createConversation on this engine knows what's alive.
+        activeConversations[resolved.engineKey] = resolved.conversation
     }
 
     /**
@@ -1037,6 +1094,7 @@ class LLMServerService : Service() {
      * Closes the conversation as a side effect.
      */
     private fun invalidateSession(resolved: ResolvedSession) {
+        activeConversations.remove(resolved.engineKey, resolved.conversation)
         val cacheKey = resolved.cacheKey
         if (cacheKey != null) {
             sessions.remove(cacheKey)
@@ -1048,6 +1106,7 @@ class LLMServerService : Service() {
     /** Stateless cleanup helper. */
     private fun closeIfStateless(resolved: ResolvedSession) {
         if (!resolved.isCached) {
+            activeConversations.remove(resolved.engineKey, resolved.conversation)
             try { resolved.conversation.close() } catch (_: Exception) {}
         }
     }
