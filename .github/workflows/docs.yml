@@ -1,0 +1,72 @@
+name: docs
+
+# Build the mkdocs Material site and publish to GitHub Pages whenever main
+# changes. Pages source must be set to "GitHub Actions" under repo Settings →
+# Pages once before this workflow can deploy.
+
+on:
+  push:
+    branches: [main]
+    # Save runner time: only rebuild when docs- or config-relevant files change.
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+# Required to allow the deploy step to publish a Pages artifact.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one concurrent deploy to Pages at a time. Don't cancel an in-flight
+# deploy if a new commit lands — let the first finish, then the second runs.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Needed for git-revision-date plugins if we add them later.
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ hashFiles('docs/requirements.txt') }}
+          restore-keys: |
+            pip-
+
+      - name: Install mkdocs-material
+        run: pip install -r docs/requirements.txt
+
+      - name: Build site
+        run: mkdocs build --site-dir _site
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
