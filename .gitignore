@@ -11,3 +11,7 @@ local.properties
 app/build
 /app/release
 .kotlin
+
+# mkdocs local-build output and the venv used to build it
+/site/
+.venv-docs/
