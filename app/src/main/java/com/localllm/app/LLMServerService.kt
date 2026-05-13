@@ -188,6 +188,21 @@ class LLMServerService : Service() {
     private val gson = Gson()
 
     /**
+     * Lazy ObjectBox-backed document store. Opens on first /v1/documents or
+     * /v1/search request; closed in onDestroy.
+     */
+    @Volatile private var documentStoreRef: com.localllm.app.rag.DocumentStore? = null
+    private fun documentStore(): com.localllm.app.rag.DocumentStore {
+        documentStoreRef?.let { return it }
+        synchronized(this) {
+            documentStoreRef?.let { return it }
+            val s = com.localllm.app.rag.DocumentStore(this)
+            documentStoreRef = s
+            return s
+        }
+    }
+
+    /**
      * Embedding service cache. Keyed by model id (the basename without
      * extension). At most one resident — the model is small (~127 MB for
      * bge-small) but each ORT session still holds non-trivial RAM, and we
@@ -586,6 +601,208 @@ class LLMServerService : Service() {
                                     message = "Embedding inference failed: ${e.message ?: e.javaClass.simpleName}",
                                     type = "api_error",
                                     code = 500
+                                ))
+                            )
+                        }
+                    }
+
+                    /* ----- /v1/documents (RAG corpus management) ----- */
+
+                    post("/v1/documents") {
+                        if (!authorize(call)) return@post
+                        lastActivityAt.set(System.currentTimeMillis())
+
+                        val req = try {
+                            call.receive<DocumentRequest>()
+                        } catch (e: Exception) {
+                            call.respond(
+                                HttpStatusCode.BadRequest,
+                                ErrorResponse(ErrorDetails(
+                                    "Invalid request body: ${e.message ?: e.javaClass.simpleName}",
+                                    "invalid_request_error", 400
+                                ))
+                            )
+                            return@post
+                        }
+                        if (req.id.isBlank() || req.text.isBlank() || req.model.isBlank()) {
+                            call.respond(
+                                HttpStatusCode.BadRequest,
+                                ErrorResponse(ErrorDetails(
+                                    "id, text, and model are required",
+                                    "invalid_request_error", 400
+                                ))
+                            )
+                            return@post
+                        }
+
+                        val maxChars = Settings.maxPromptChars(this@LLMServerService)
+                        if (req.text.length > maxChars * 50) {
+                            // 50x the prompt cap is the rough budget for a
+                            // single uploaded document — beyond that the
+                            // caller should split client-side.
+                            call.respond(
+                                HttpStatusCode.PayloadTooLarge,
+                                ErrorResponse(ErrorDetails(
+                                    "Document text exceeds the per-upload size cap",
+                                    "invalid_request_error", 413
+                                ))
+                            )
+                            return@post
+                        }
+
+                        val chunks = com.localllm.app.rag.Chunker.chunk(req.text)
+                        if (chunks.isEmpty()) {
+                            call.respond(
+                                HttpStatusCode.BadRequest,
+                                ErrorResponse(ErrorDetails(
+                                    "Document text is empty after trimming",
+                                    "invalid_request_error", 400
+                                ))
+                            )
+                            return@post
+                        }
+
+                        val svc = try {
+                            getOrCreateEmbeddingService(req.model)
+                        } catch (e: Exception) {
+                            call.respond(
+                                HttpStatusCode.NotFound,
+                                ErrorResponse(ErrorDetails(
+                                    "Embedding model '${req.model}' not available: ${e.message ?: e.javaClass.simpleName}",
+                                    "invalid_request_error", 404
+                                ))
+                            )
+                            return@post
+                        }
+
+                        try {
+                            val vectors = svc.embed(chunks)
+                            val metadataStr = req.metadata?.toString()
+                            val entities = chunks.mapIndexed { i, text ->
+                                com.localllm.app.rag.DocumentChunk(
+                                    documentId = req.id,
+                                    chunkIndex = i,
+                                    text = text,
+                                    metadata = metadataStr,
+                                    embeddingModel = req.model,
+                                    embedding = vectors[i].first,
+                                )
+                            }
+                            // Replace prior chunks for this id so re-POSTing
+                            // the same id is an upsert, not a duplicate.
+                            documentStore().deleteDocument(req.id)
+                            documentStore().put(entities)
+                            call.respond(DocumentSummaryResponse(
+                                documentId = req.id,
+                                chunkCount = entities.size,
+                                model = req.model,
+                            ))
+                        } catch (e: Throwable) {
+                            LogManager.e("LLMServerService", "Document ingest failed: ${e.message}", e)
+                            call.respond(
+                                HttpStatusCode.InternalServerError,
+                                ErrorResponse(ErrorDetails(
+                                    "Document ingest failed: ${e.message ?: e.javaClass.simpleName}",
+                                    "api_error", 500
+                                ))
+                            )
+                        }
+                    }
+
+                    get("/v1/documents") {
+                        if (!authorize(call)) return@get
+                        val summaries = documentStore().listDocuments().map {
+                            DocumentSummaryResponse(
+                                documentId = it.documentId,
+                                chunkCount = it.chunkCount,
+                                model = it.embeddingModel,
+                            )
+                        }
+                        call.respond(DocumentListResponse(data = summaries))
+                    }
+
+                    delete("/v1/documents/{id}") {
+                        if (!authorize(call)) return@delete
+                        val id = call.parameters["id"]
+                        if (id.isNullOrBlank()) {
+                            call.respond(
+                                HttpStatusCode.BadRequest,
+                                ErrorResponse(ErrorDetails("id is required", "invalid_request_error", 400))
+                            )
+                            return@delete
+                        }
+                        val n = documentStore().deleteDocument(id)
+                        call.respond(DocumentDeleteResponse(
+                            documentId = id,
+                            deleted = n > 0,
+                            chunksRemoved = n,
+                        ))
+                    }
+
+                    /* ----- /v1/search (kNN over the document store) ----- */
+
+                    post("/v1/search") {
+                        if (!authorize(call)) return@post
+                        lastActivityAt.set(System.currentTimeMillis())
+
+                        val req = try { call.receive<SearchRequest>() } catch (e: Exception) {
+                            call.respond(
+                                HttpStatusCode.BadRequest,
+                                ErrorResponse(ErrorDetails(
+                                    "Invalid request body: ${e.message ?: e.javaClass.simpleName}",
+                                    "invalid_request_error", 400
+                                ))
+                            )
+                            return@post
+                        }
+                        if (req.query.isBlank() || req.model.isBlank()) {
+                            call.respond(
+                                HttpStatusCode.BadRequest,
+                                ErrorResponse(ErrorDetails("query and model are required", "invalid_request_error", 400))
+                            )
+                            return@post
+                        }
+                        val k = (req.k ?: 5).coerceIn(1, 50)
+
+                        val svc = try {
+                            getOrCreateEmbeddingService(req.model)
+                        } catch (e: Exception) {
+                            call.respond(
+                                HttpStatusCode.NotFound,
+                                ErrorResponse(ErrorDetails(
+                                    "Embedding model '${req.model}' not available: ${e.message ?: e.javaClass.simpleName}",
+                                    "invalid_request_error", 404
+                                ))
+                            )
+                            return@post
+                        }
+
+                        try {
+                            val queryVec = svc.embed(listOf(req.query)).first().first
+                            val hits = documentStore().nearest(queryVec, k, req.model).map { (chunk, distance) ->
+                                // ObjectBox DOT_PRODUCT distance is `1 - cosine` for
+                                // unit-norm vectors. Surface cosine so clients see
+                                // numbers in the familiar [-1, 1] range.
+                                val cosine = 1f - distance
+                                val metaJson: com.google.gson.JsonElement? = chunk.metadata?.let {
+                                    runCatching { com.google.gson.JsonParser.parseString(it) }.getOrNull()
+                                }
+                                SearchHit(
+                                    documentId = chunk.documentId,
+                                    chunkIndex = chunk.chunkIndex,
+                                    text = chunk.text,
+                                    score = cosine,
+                                    metadata = metaJson,
+                                )
+                            }
+                            call.respond(SearchResponse(data = hits, model = req.model))
+                        } catch (e: Throwable) {
+                            LogManager.e("LLMServerService", "Search failed: ${e.message}", e)
+                            call.respond(
+                                HttpStatusCode.InternalServerError,
+                                ErrorResponse(ErrorDetails(
+                                    "Search failed: ${e.message ?: e.javaClass.simpleName}",
+                                    "api_error", 500
                                 ))
                             )
                         }
@@ -1570,6 +1787,10 @@ class LLMServerService : Service() {
         sessions.evictAll()
         engines.evictAll()
         embeddings.evictAll()
+        documentStoreRef?.let {
+            try { it.close() } catch (_: Exception) {}
+            documentStoreRef = null
+        }
         try {
             kotlinx.coroutines.runBlocking { RequestTracker.resetAll() }
         } catch (_: Exception) {}
