@@ -8,6 +8,292 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 Nothing yet.
 
+## [1.1.0] — 2026-05-12
+
+Production-readiness pass + tab-by-tab UX overhaul. Inference layer is
+unchanged; this is all the operational and visual scaffolding around it.
+
+### Added
+
+#### Release & build
+
+- **R8 + resource shrinking** on the release buildType. ProGuard rules
+  already covered LiteRT-LM, Ktor, Netty, Gson, Compose — no new keep
+  rules surfaced. `:app:assembleRelease` and `:app:bundleRelease` both
+  green.
+- **Per-ABI APK splits**. `arm64-v8a` only (LiteRT-LM 0.11.0 ships JNI
+  `.so` files for `arm64-v8a` + `x86_64` only — no `armeabi-v7a`). The
+  arm64-v8a release APK is **~28 MB**, the universal is ~39 MB, the
+  `.aab` is ~33 MB.
+- **`signingConfigs.release`** reading from `~/.gradle/gradle.properties`
+  or environment (`LOCALLLM_KEYSTORE_PATH` / `_PASSWORD` / `_ALIAS` /
+  `_PASSWORD`). Gracefully falls back to the debug signing key when any
+  of the four is missing — so contributors run `:app:assembleRelease`
+  without needing the production keystore.
+- **`scripts/release.sh`** — one-command release: assembleDebug + mkdocs
+  gh-deploy + tag + push + `gh release create` with notes scraped from
+  this CHANGELOG.
+- **`.github/workflows/docs.yml`** — Material site build + Pages deploy,
+  triggered on `docs/` / `mkdocs.yml` changes. Pages currently sourced
+  from the `gh-pages` branch (legacy mode) because GitHub Actions is
+  administratively restricted on the hosting account — the workflow
+  auto-resumes once Actions is re-enabled.
+- **`.github/dependabot.yml`** — weekly Monday updates for gradle,
+  github-actions, and the pip-based docs requirements; Compose / Kotlin /
+  Ktor each in their own update group; LiteRT-LM explicitly pinned
+  (manual bumps only — model-side smoke test required).
+
+#### Performance & lifecycle
+
+- **Baseline Profiles** via a new `:macrobenchmark` module
+  (`com.android.test` + `androidx.baselineprofile`). `StartupBenchmark`
+  measures cold-start under `CompilationMode.None / Partial / Full`;
+  `BaselineProfileGenerator` walks Catalog → Dashboard → Console → Chat
+  → Settings. Run on a device with
+  `./gradlew :app:generateReleaseBaselineProfile`.
+- **`onTrimMemory` engine eviction**. `RUNNING_LOW / MODERATE` shrinks
+  the engine LRU to 1; `RUNNING_CRITICAL / COMPLETE` evicts everything.
+  Both gated by `inferenceMutex.tryLock` so eviction never interrupts
+  an active request.
+- **`Lifecycle.Event.ON_START` re-kick** in `MainActivity`. If the OS
+  killed the foreground service while the Activity was backgrounded
+  and autostart is on, the service comes back up the next time the
+  user returns to the app.
+- **`START_STICKY` contract documented** on `onStartCommand`.
+
+#### AUTO backend with real fallback
+
+- AUTO now tries `Backend.GPU` first; on `Engine.initialize()` failure
+  (the common case on stock Pixel images missing `libvndksupport.so`),
+  logs a warning and rebuilds on `Backend.CPU`. Explicit CPU / GPU
+  selections stay strict (no fallback) so the user can debug them.
+- New **`engines` array** in `GET /health` surfaces the backend each
+  cached engine actually initialized on:
+
+  ```json
+  "engines": [
+    { "key": "gemma-4-e2b_model_AUTO", "backend": "CPU" }
+  ]
+  ```
+
+#### Settings layer
+
+- **`SettingsRepository`** backed by `androidx.datastore.preferences:
+  1.1.1` with `SharedPreferencesMigration("settings")` so existing prefs
+  carry over. Compose UI observes `StateFlow`s instead of re-reading
+  SharedPreferences on every recomposition (slider drag was triggering
+  ~60 disk reads/sec before).
+- **Public `Settings.xxx(context)` API** preserved byte-for-byte — every
+  existing caller (LLMServerService, BootReceiver, etc.) keeps working
+  unchanged.
+
+#### Debug-build hygiene
+
+- **`StrictMode`** thread + VM policies installed under `BuildConfig.
+  DEBUG`. `detectDiskReads / detectDiskWrites / detectNetwork /
+  detectLeakedClosableObjects / detectActivityLeaks`, all with
+  `penaltyLog` only — never `penaltyDeath`.
+
+#### Catalog tab (UX overhaul)
+
+- **`LinearProgressIndicator`** with `"X.X MB / Y.Y GB"` subtitle and
+  inline `Cancel` (`Icons.Outlined.Close`) — replaces the text-only
+  percentage.
+- **SHA-256 verified badge** (`Icons.Outlined.Verified` for built-ins
+  with a known hash; `Icons.Outlined.Info` for custom URLs).
+- **File size + last-used relative time** on installed models, via
+  `Formatter.formatShortFileSize` and `DateUtils.getRelativeTimeSpanString`.
+- **"Get started" hero card** when nothing is installed yet.
+- **OutlinedCard hierarchy** with proper M3 spacing, icons on every
+  action (`Download`, `Delete`, `UploadFile`, `Close`).
+
+#### Chat tab (markdown + visual polish)
+
+- **`MarkdownText`** composable backed by `org.commonmark:commonmark:
+  0.22.0` — renders assistant messages with code blocks, lists (capped
+  at depth 2), inline code, headings, bold/italic, block quotes, and
+  links. Code blocks have a copy-to-clipboard icon. No WebView.
+- **Bubble overhaul**: role icons (`Icons.Outlined.Person` /
+  `Icons.Outlined.AutoAwesome`), right-aligned timestamps, asymmetric
+  rounded corners, 90% max-width, `primaryContainer` vs `surfaceVariant`
+  backgrounds.
+- **Streaming reveal animation**: `Animatable` fades trailing delta
+  characters from 0.5α to full opacity over `tween(200ms)`. Swaps to
+  `MarkdownText` rendering once streaming completes.
+- **Empty-state hero**: `Icons.Outlined.AutoAwesome` 56dp + title + body
+  + 4 `AssistChip` sample prompts. Tap a chip to fill the input — never
+  auto-sends.
+- **Send / Stop buttons get icons** (`AutoMirrored.Outlined.Send`,
+  `Icons.Outlined.Stop` with `errorContainer` colors).
+- **`UiMessage.timestampMs`** field added (default-valued, backwards
+  compatible).
+
+#### Settings tab (restructure + Pixel-6 awareness)
+
+- **Six collapsible domain sections** with leading icons: Server
+  (`Dns`, expanded by default), Inference (`Memory`), Security (`Lock`),
+  Background (`Battery5Bar`), Limits (`Speed`), Startup
+  (`PowerSettingsNew`). Animated chevron rotation.
+- **Per-row Help expandables** (`Icons.Outlined.HelpOutline`) — tap to
+  toggle inline description without crowding the surface.
+- **Backend description rewrite**: removed the old MediaPipe / Pixel 10 /
+  Tensor G5 / "NPU auto" claims. New copy describes AUTO as
+  GPU-first-then-CPU fallback, CPU as ~6–12 tok/s on Pixel-class
+  hardware for Gemma 4 E2B, GPU as strict-no-fallback. The selected
+  mode's line gets a primary-container-tinted background.
+- **Chipset hint** above the backend selector, driven by `Build.SOC_MODEL`
+  (API 31+). Renders *"Your device: Pixel 6 (Tensor). GPU delegate often
+  fails; AUTO will fall back to CPU."* on Tensor SoCs (`gs101+`),
+  *"…(Snapdragon). NPU variant `.litertlm` files in the catalog should
+  work."* on Snapdragon, otherwise *"AUTO is the safe choice."*
+- **Port-in-use validator**: `ServerSocket(port).also{close}` attempt
+  500 ms after the port field changes. On `IOException` the field
+  shows error-tinted helper text without blocking save.
+
+#### Dashboard tab
+
+- **2×2 stat-card grid** with leading icons: Total / Avg latency / Avg
+  tok/s / Error rate. Error rate severity-colored (green <1%, amber <5%,
+  error >5%).
+- **Tok/s sparkline** via pure Compose `Canvas` — no chart library
+  added. Catmull-Rom → cubic Bezier smoothing, 20%-alpha fill under
+  the line, max-Y label top-right. Handles empty history / single
+  point / NaN / all-zeros cleanly.
+- **Promoted in-flight card** with rotating `Icons.Outlined.Bolt` and
+  indeterminate `LinearProgressIndicator`. Collapses to "Idle" with
+  `Icons.Outlined.Pause` when nothing is running.
+- **Status-icon history rows**: `CheckCircle` / `Cancel` / `Error`
+  leading icons. Tap to expand and see full request details inline.
+
+#### Console tab
+
+- **Debounced search** (300 ms via `snapshotFlow + debounce`) with
+  `Icons.Outlined.Search` leading icon and `Icons.Outlined.Close`
+  clear-query trailing icon.
+- **Level FilterChips** (DEBUG / INFO / WARN / ERROR) — each chip's
+  leading dot is colored to match its corresponding log-level text
+  color.
+- **Top-5 tag FilterChips** parsed from `[tag] message` prefixes, with
+  a "More…" overflow dropdown when the buffer has more than 5 distinct
+  tags.
+- **Auto-scroll toggle** (`Icons.Outlined.VerticalAlignBottom`).
+- **Color-coded log lines** by level.
+- **Long-press copy** writes the full `[time] LEVEL message` line to
+  the clipboard with a "Copied" toast.
+- **"No matching log entries" empty state** with a "Clear filters"
+  `TextButton`.
+
+#### Chrome restructure (header + tabs + theme)
+
+- **`Scaffold` layout** replacing the bespoke `Column { Header +
+  ScrollableTabRow + Box }`. The old 2-row LIVE banner (~120dp of
+  vertical chrome) is gone.
+- **Compact `CenterAlignedTopAppBar`** (56dp): status dot in the
+  leading slot, middle-ellipsized URL as the title, context-aware
+  trailing actions (Tune + Refresh on Chat tab; Copy URL elsewhere).
+- **Top `ScrollableTabRow` → bottom `NavigationBar`** with proper M3
+  icons (`FolderOpen` / `BarChart` / `Terminal` /
+  `AutoMirrored.Outlined.Chat` / `Settings`). Better one-handed reach
+  on a 6.4" phone, more content above the fold.
+- **Palette overhaul**: primary desaturated `#4ECDC4 → #6BD3CC`,
+  full M3 surface tonal scale (background `#0E1113`, surface
+  `#14181A`, surfaceVariant `#222729`), brand teal reserved for the
+  status dot, primary CTAs, progress, and user-message bubbles.
+  WCAG-AA contrast verified.
+- **`Header.kt`** trimmed to a `StatusDot(status)` helper used by the
+  app bar's leading slot.
+- **Chat bubble redo**: assistant messages are now borderless
+  full-bleed text with a 3dp primary-tinted left rail (no card
+  outline); user messages are tighter right-aligned pills (80%
+  max-width, 20dp radius). Role icons removed — alignment + tint
+  carry the signal.
+- **Chat input row**: rounded `Surface` containing a borderless
+  `BasicTextField` and one circular Send/Stop button that swaps icon
+  + tint based on `isChatting`. No more `OutlinedTextField` chrome.
+- **System prompt** moved out of the chat body into a
+  `ModalBottomSheet`, reachable from either the app-bar `Tune` icon
+  or an inline edit icon on a persistent strip (only shown when a
+  prompt is set).
+- **Model selector**: replaced the labelled `OutlinedTextField` with
+  a compact `AssistChip` + `DropdownMenu`. Live tok/s collapses to a
+  chip on the same row when streaming.
+
+#### General
+
+- **`androidx.compose.material:material-icons-extended`** dep
+  (BOM-managed, no version pin) — now available app-wide for the new
+  iconography across every tab.
+- **`CHANGELOG.md`** introduced (Keep a Changelog 1.1.0 format).
+
+### Changed
+
+- **JDK source / target** bumped 1.8 → 11 to silence AGP 8.7 deprecation
+  warnings (Kotlin source target was already 11).
+- **`AndroidManifest.xml` `foregroundServiceType`**: `dataSync` →
+  **`specialUse`** with the Play-required
+  `PROPERTY_SPECIAL_USE_FGS_SUBTYPE` justification declaring on-device
+  inference. The `FOREGROUND_SERVICE_DATA_SYNC` permission swapped for
+  `FOREGROUND_SERVICE_SPECIAL_USE`.
+- **ProGuard rules** retargeted from MediaPipe keeps to LiteRT-LM
+  (`com.google.ai.edge.litertlm.**`). Old MediaPipe + protobuf entries
+  removed.
+- **Pages deploy mode** flipped from "GitHub Actions" to "Deploy from a
+  branch (gh-pages)" — works around the account-level Actions
+  restriction. The `docs.yml` workflow stays in tree for when Actions
+  is re-enabled.
+
+### Removed
+
+- Unused imports: `com.google.ai.edge.litertlm.Role` and
+  `kotlinx.coroutines.flow.collect` in `LLMServerService.kt`;
+  `kotlinx.coroutines.flow.map` in `SettingsRepository.kt`.
+- Unused `kotlinx-serialization-json` dependency and the corresponding
+  `kotlinSerialization` Gradle plugin alias (the project uses Gson
+  exclusively).
+
+### Fixed
+
+- **`FAILED_PRECONDITION: A session already exists`** on
+  `engine.createConversation()`. LiteRT-LM's Engine enforces at most
+  one active `Conversation` per engine, but our sessions LRU (size 4)
+  could hold multiple cached conversations against the same engine,
+  and stateless conversations whose `close()` didn't fully propagate
+  before the next request would also leave the slot occupied. Both
+  manifested as HTTP 500 on the second or third inference request.
+  New `activeConversations: ConcurrentHashMap<String, Conversation>`
+  tracks the single live conversation per engine; the new
+  `purgeConversationsOnEngine(engineKey)` helper closes every
+  conversation we know about on a given engine before constructing a
+  new one. Defensive: if `createConversation` still throws "session
+  already exists" (race), force-evict the engine and surface a
+  retry-able error.
+- **Stale source-code references** to MediaPipe / `tasks-genai` /
+  Pixel 10 / Tensor G5 / NPU-as-universal / `LlmInferenceSession` /
+  `addQueryChunk`. Final grep across `app/src/main/java/com/localllm/
+  app/**` returns zero hits.
+- **`Settings.kt` `KEY_BACKEND` comment** — replaced false claim that
+  AUTO passes `Backend.DEFAULT` to MediaPipe (it doesn't, since the
+  migration) with accurate GPU-first-then-CPU fallback semantics.
+- **`ApiTypes.kt` `sessionId` KDoc** — replaced
+  `LlmInferenceSession` / `addQueryChunk` description with the
+  LiteRT-LM `Conversation`-based reality.
+
+### Known issues
+
+- **GitHub Actions administratively restricted** on the hosting account
+  pending Trust & Safety review. `build.yml` and `docs.yml` workflows
+  are dormant; CI parity is enforced locally
+  (`./gradlew lint testDebugUnitTest assembleDebug`). Docs deploy works
+  manually via `mkdocs gh-deploy --force --remote-branch gh-pages`.
+- **GPU backend init fails on stock Pixel images** missing
+  `libvndksupport.so`. AUTO transparently falls back to CPU. On Pixel 6
+  / Tensor G1 this is the expected path. CPU + XNNPACK gives ~6–12
+  tok/s on Gemma 4 E2B.
+- **Multi-process isolation** (`android:process=":server"` for
+  `LLMServerService`) deferred — would require IPC for the cross-process
+  singletons (`ServerState`, `RequestTracker`, `LogManager`). Tracked
+  but not in this release.
+
 ## [1.0.0] — 2026-05-12
 
 First public release. Replaces the original MediaPipe `tasks-genai`
