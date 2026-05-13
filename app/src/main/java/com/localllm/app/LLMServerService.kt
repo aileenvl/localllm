@@ -926,17 +926,7 @@ class LLMServerService : Service() {
      */
     private fun loadImageBytes(url: String): ByteArray {
         val raw: ByteArray = when {
-            url.startsWith("data:") -> {
-                val base64 = url.substringAfter("base64,", "")
-                if (base64.isEmpty()) {
-                    throw IllegalArgumentException("data: URL must be base64-encoded")
-                }
-                try {
-                    Base64.decode(base64, Base64.DEFAULT)
-                } catch (e: Exception) {
-                    throw IllegalArgumentException("Invalid base64 in data: URL: ${e.message}")
-                }
-            }
+            url.startsWith("data:") -> decodeDataImageUrl(url)
             isLoopbackHttpUrl(url) -> {
                 val resp = imageHttp.newCall(OkRequest.Builder().url(url).build()).execute()
                 resp.use { r ->
@@ -968,14 +958,6 @@ class LLMServerService : Service() {
             )
         }
         return downscaleIfNeeded(raw)
-    }
-
-    private fun isLoopbackHttpUrl(url: String): Boolean {
-        if (!url.startsWith("http://")) return false
-        val rest = url.removePrefix("http://")
-        val hostAndRest = rest.substringBefore('/')
-        val host = hostAndRest.substringBefore(':')
-        return host.equals("localhost", ignoreCase = true) || host == "127.0.0.1" || host == "[::1]"
     }
 
     /** Decode + downscale + re-encode JPEG if dimensions exceed [maxImageDim]. */
@@ -1050,35 +1032,6 @@ class LLMServerService : Service() {
         }
     }
 
-    /** Parse an OpenAI `function.arguments` JSON string into a Kotlin map. */
-    private fun parseToolArguments(raw: String): Map<String, Any> {
-        if (raw.isBlank()) return emptyMap()
-        return try {
-            val el = JsonParser.parseString(raw)
-            if (!el.isJsonObject) emptyMap()
-            else el.asJsonObject.entrySet().associate { (k, v) -> k to jsonToAny(v) }
-        } catch (_: Exception) {
-            emptyMap()
-        }
-    }
-
-    private fun jsonToAny(v: com.google.gson.JsonElement): Any {
-        return when {
-            v.isJsonNull -> ""
-            v.isJsonPrimitive -> {
-                val p = v.asJsonPrimitive
-                when {
-                    p.isBoolean -> p.asBoolean
-                    p.isNumber -> p.asNumber
-                    else -> p.asString
-                }
-            }
-            v.isJsonArray -> v.asJsonArray.map { jsonToAny(it) }
-            v.isJsonObject -> v.asJsonObject.entrySet().associate { (k, e) -> k to jsonToAny(e) }
-            else -> v.toString()
-        }
-    }
-
     /**
      * Build a LiteRT-LM [ToolProvider] from an OpenAI-shaped function definition.
      * We construct an [OpenApiTool] whose `toolDescriptionJsonString` is the
@@ -1093,15 +1046,9 @@ class LLMServerService : Service() {
      */
     private fun buildToolProvider(def: ToolDef): ToolProvider {
         val name = def.function.name
-        val desc = def.function.description ?: ""
-        val params = def.function.parameters
-        val descJson = JsonObject().apply {
-            addProperty("name", name)
-            addProperty("description", desc)
-            add("parameters", params)
-        }
+        val descJson = buildToolDescriptionJson(name, def.function.description, def.function.parameters)
         val openApi = object : OpenApiTool {
-            override fun getToolDescriptionJsonString(): String = descJson.toString()
+            override fun getToolDescriptionJsonString(): String = descJson
             override fun execute(paramsJsonString: String): String {
                 // Server-side execution is intentionally not implemented — the
                 // HTTP client owns tool execution. If the runtime ever calls
@@ -1273,21 +1220,6 @@ class LLMServerService : Service() {
      * isn't lying about conversation continuity: if their replayed prefix
      * doesn't match what we recorded, we reset the cached conversation.
      */
-    private fun messagesPrefixHash(messages: List<Message>, count: Int): Long {
-        var h = 1L
-        val n = minOf(count, messages.size)
-        for (i in 0 until n) {
-            val m = messages[i]
-            h = h * 31L + m.role.hashCode()
-            // Use the JSON serialization of content so the hash captures both
-            // string-shaped and array-shaped (multimodal) bodies equivalently.
-            h = h * 31L + (m.content?.toString()?.hashCode() ?: 0)
-            h = h * 31L + (m.toolCallId?.hashCode() ?: 0)
-            h = h * 31L + (m.toolCalls?.hashCode() ?: 0)
-        }
-        return h
-    }
-
     /**
      * Decide whether to reuse a cached conversation or build a fresh one, and
      * compute the prompt fragment to send accordingly.
