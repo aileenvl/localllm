@@ -450,10 +450,14 @@ class LLMServerService : Service() {
                         val req = try {
                             call.receive<ChatRequest>()
                         } catch (e: Exception) {
+                            // Surface the underlying parser exception so polymorphic-content
+                            // shape errors don't disappear behind Ktor's generic wrapper.
+                            LogManager.e("LLMServerService", "Failed to parse ChatRequest body", e)
+                            val rootCause = generateSequence(e as Throwable?) { it.cause }.lastOrNull() ?: e
                             call.respond(
                                 HttpStatusCode.BadRequest,
                                 ErrorResponse(ErrorDetails(
-                                    message = "Invalid JSON body: ${e.message}",
+                                    message = "Invalid JSON body: ${rootCause.javaClass.simpleName}: ${rootCause.message ?: e.message}",
                                     type = "invalid_request_error",
                                     code = 400
                                 ))
@@ -1087,11 +1091,20 @@ class LLMServerService : Service() {
         val systemInstruction = systemText?.takeIf { it.isNotBlank() }?.let { Contents.of(it) }
         val priorMessages = initial.map { m -> apiToLlmMessage(m) }
         val toolProviders: List<ToolProvider> = tools?.map { def -> buildToolProvider(def) } ?: emptyList()
+        // automaticToolCalling MUST be false. LiteRT-LM 0.11.0 defaults this to
+        // true via the 4-arg ConversationConfig overload, which causes the
+        // runtime to invoke our OpenApiTool.execute() stub and feed the result
+        // straight back to the model — bypassing the HTTP client entirely. The
+        // OpenAI contract is "model emits tool_calls, client executes, client
+        // sends a role:tool follow-up." Passing false here is what enables that
+        // round-trip; the tool call surfaces in Message.toolCalls instead of
+        // being silently consumed by the engine.
         val cfg = ConversationConfig(
             systemInstruction,
             priorMessages,
             toolProviders,
-            SamplerConfig(topK, /*topP=*/0.95, temperature.toDouble(), /*seed=*/0)
+            SamplerConfig(topK, /*topP=*/0.95, temperature.toDouble(), /*seed=*/0),
+            /*automaticToolCalling=*/ false
         )
         val conv = try {
             engine.createConversation(cfg)
