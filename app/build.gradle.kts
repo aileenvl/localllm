@@ -5,6 +5,11 @@ plugins {
     alias(libs.plugins.androidxBaselineProfile)
 }
 
+// ObjectBox plugin applied imperatively because it ships without a plugin
+// marker (classpath wired in the root build.gradle.kts). Apply must come
+// after the `android` plugin so the AGP variants are available.
+apply(plugin = "io.objectbox")
+
 android {
     namespace = "com.localllm.app"
     compileSdk = 35
@@ -117,6 +122,11 @@ dependencies {
 
     // Async, Flow-native settings persistence (replaces SharedPreferences)
     implementation(libs.androidx.datastore.preferences)
+
+    // ObjectBox on-device vector store. Backs the /v1/documents + /v1/search
+    // endpoints with an HNSW-indexed embedding column for sub-millisecond kNN.
+    implementation(libs.objectbox.android)
+    implementation(libs.objectbox.kotlin)
 
     // Ktor Server (OpenAI-compatible HTTP API)
     implementation(libs.ktor.server.core)

@@ -8,6 +8,30 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+#### RAG: on-device document store + semantic search
+
+- **ObjectBox 4.0.3 vector store**, persisted under the app's private data
+  directory. Each `DocumentChunk` carries an HNSW-indexed `FloatArray`
+  (dimensions=384, DOT_PRODUCT distance — equivalent to cosine for the
+  L2-normalised vectors produced by `/v1/embeddings`).
+- **`POST /v1/documents`** ingests a `{id, text, model, metadata?}` payload,
+  paragraph-chunks it (~400 char windows with ~60 char overlap, sliding-
+  window fallback for paragraphs that exceed the cap), embeds each chunk,
+  and persists them. Re-POSTing the same id replaces the prior chunks
+  (upsert semantics).
+- **`GET /v1/documents`** lists all stored documents with chunk count and
+  the embedding model used.
+- **`DELETE /v1/documents/{id}`** removes every chunk for a document.
+- **`POST /v1/search`** embeds a `{query, model, k?}` payload and returns
+  the top-K `{document_id, chunk_index, text, score, metadata}` hits.
+  `score` is cosine similarity (not raw HNSW distance) so values are in
+  the familiar [-1, 1] range.
+- Pure-JVM unit tests cover the chunker (paragraph-aware split, overlap
+  carry-over, sliding-window fallback for oversized paragraphs).
+
+Verified on Pixel 6: matching documents score 0.57–0.67 vs ~0.30–0.36 for
+unrelated ones — clean separation.
+
 #### Embeddings (`POST /v1/embeddings`)
 
 - **OpenAI-compatible embeddings endpoint** powered by ONNX Runtime Android

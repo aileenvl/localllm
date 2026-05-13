@@ -297,3 +297,55 @@ data class EmbeddingUsage(
     @SerializedName("prompt_tokens") val promptTokens: Int,
     @SerializedName("total_tokens") val totalTokens: Int,
 )
+
+/* ---------- RAG: documents + search wire types ---------- */
+
+/**
+ * `POST /v1/documents` request. The server chunks [text] (~400 chars per
+ * window with ~60-char overlap), embeds each chunk with [model], and
+ * persists them under the client-supplied [id]. Re-using the same [id]
+ * replaces the prior chunks for that document.
+ */
+data class DocumentRequest(
+    val id: String,
+    val text: String,
+    val model: String,
+    val metadata: JsonElement? = null,
+)
+
+data class DocumentSummaryResponse(
+    @SerializedName("document_id") val documentId: String,
+    @SerializedName("chunk_count") val chunkCount: Int,
+    val model: String,
+)
+
+data class DocumentListResponse(
+    val `object`: String = "list",
+    val data: List<DocumentSummaryResponse>,
+)
+
+data class DocumentDeleteResponse(
+    @SerializedName("document_id") val documentId: String,
+    val deleted: Boolean,
+    @SerializedName("chunks_removed") val chunksRemoved: Int,
+)
+
+data class SearchRequest(
+    val query: String,
+    val model: String,
+    val k: Int? = null,
+)
+
+data class SearchHit(
+    @SerializedName("document_id") val documentId: String,
+    @SerializedName("chunk_index") val chunkIndex: Int,
+    val text: String,
+    val score: Float,
+    val metadata: JsonElement? = null,
+)
+
+data class SearchResponse(
+    val `object`: String = "list",
+    val data: List<SearchHit>,
+    val model: String,
+)
