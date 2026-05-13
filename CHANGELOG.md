@@ -6,7 +6,30 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+#### Embeddings (`POST /v1/embeddings`)
+
+- **OpenAI-compatible embeddings endpoint** powered by ONNX Runtime Android
+  (`com.microsoft.onnxruntime:onnxruntime-android:1.18.0`) and a hand-rolled
+  BERT WordPiece tokenizer (no JNI tokenizer dependency). Accepts `input` as
+  either a single string or an array of strings; returns mean-pooled,
+  L2-normalised float vectors plus `usage.prompt_tokens`.
+- **`/v1/models` surfaces ONNX embedding models** alongside LiteRT-LM
+  language models. A model is considered available when both
+  `<modelId>.onnx` and `<modelId>-vocab.txt` are present in the app's
+  external files dir.
+- **Validated on Pixel 6 with `bge-small-en-v1.5`** (384-dim): cosine
+  synonyms 0.74, cosine unrelated 0.32, ~210 ms steady-state per 128-token
+  text on the CPU backend.
+- Embedding services share the same idle-eviction and memory-pressure
+  lifecycle as LM engines: closed automatically after `Settings.idleEvictMs`
+  of inactivity, evicted hard on `TRIM_MEMORY_RUNNING_CRITICAL`.
+
+### Changed
+
+- APK grows ~30 MB on `arm64-v8a` from the bundled ONNX runtime native
+  library. The other ABIs were already excluded by the splits config.
 
 ## [1.2.0] — 2026-05-13
 

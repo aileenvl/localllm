@@ -109,6 +109,12 @@ dependencies {
     // Markdown parsing (Java, no Android dependency) for assistant message rendering
     implementation(libs.commonmark)
 
+    // ONNX Runtime for the /v1/embeddings endpoint (BGE-class sentence
+    // embeddings). Adds ~30 MB across ABIs but only ships JNI .so files for
+    // arm64-v8a (see splits block). Engines for the LM remain on LiteRT-LM —
+    // this is the embedding side only.
+    implementation(libs.onnxruntime.android)
+
     // Async, Flow-native settings persistence (replaces SharedPreferences)
     implementation(libs.androidx.datastore.preferences)
 
