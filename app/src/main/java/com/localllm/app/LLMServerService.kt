@@ -29,7 +29,11 @@ import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.OpenApiTool
 import com.google.ai.edge.litertlm.SamplerConfig
+import com.google.ai.edge.litertlm.ToolCall
+import com.google.ai.edge.litertlm.ToolProvider
+import com.google.ai.edge.litertlm.tool
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -49,7 +53,16 @@ import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import com.google.gson.Gson
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
+import android.graphics.BitmapFactory
+import android.graphics.Bitmap
+import android.util.Base64
 import android.util.LruCache
+import okhttp3.OkHttpClient
+import okhttp3.Request as OkRequest
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.TimeUnit
 import com.google.ai.edge.litertlm.Message as LlmMessage
 
 /**
@@ -160,7 +173,9 @@ class LLMServerService : Service() {
      */
     private data class ResolvedSession(
         val conversation: Conversation,
-        val prompt: String,           // text to send via sendMessageAsync
+        /** The freshly-arrived message to send via sendMessage[Async]. Already
+         *  shaped for LiteRT-LM (user / tool follow-up content). */
+        val prompt: LlmMessage,
         val cacheKey: String?,        // null for stateless (no session_id)
         val engineKey: String,
         val temperature: Float,
@@ -445,7 +460,7 @@ class LLMServerService : Service() {
                             )
                             return@post
                         }
-                        val promptChars = req.messages.sumOf { it.content.length }
+                        val promptChars = req.messages.sumOf { it.textChars() }
 
                         // Prompt-size cap (413)
                         if (promptChars > maxChars) {
@@ -516,6 +531,7 @@ class LLMServerService : Service() {
                                                     prompt = resolvedLocal.prompt,
                                                     writer = this@respondBytesWriter,
                                                     responseId = responseId,
+                                                    requestEntryId = entry.id,
                                                     modelName = req.model,
                                                     onChunk = { chunk -> RequestTracker.recordChunk(entry.id, chunk) }
                                                 )
@@ -524,7 +540,7 @@ class LLMServerService : Service() {
                                     }
                                 }
                             } else {
-                                val responseText = withTimeout(timeoutMs) {
+                                val finalMsg = withTimeout(timeoutMs) {
                                     inferenceMutex.withLock {
                                         RequestTracker.markStarted(entry.id)
                                         withWakeLock(needWakeLock, timeoutMs) {
@@ -534,20 +550,43 @@ class LLMServerService : Service() {
                                         }
                                     }
                                 }
+                                val responseText = messageText(finalMsg)
                                 RequestTracker.recordChunk(entry.id, responseText)
+
+                                val toolCalls = finalMsg.toolCalls
+                                val choice = if (!toolCalls.isNullOrEmpty()) {
+                                    Choice(
+                                        index = 0,
+                                        message = Message(
+                                            role = "assistant",
+                                            content = null,
+                                            toolCalls = toolCalls.mapIndexed { i, tc ->
+                                                ToolCallApi(
+                                                    id = "call_${entry.id}_$i",
+                                                    type = "function",
+                                                    function = ToolCallFunction(
+                                                        name = tc.name,
+                                                        arguments = gson.toJson(tc.arguments)
+                                                    )
+                                                )
+                                            }
+                                        ),
+                                        finishReason = "tool_calls"
+                                    )
+                                } else {
+                                    Choice(
+                                        index = 0,
+                                        message = Message(role = "assistant", content = stringContent(responseText)),
+                                        finishReason = "stop"
+                                    )
+                                }
 
                                 val resp = ChatResponse(
                                     id = responseId,
                                     `object` = "chat.completion",
                                     created = System.currentTimeMillis() / 1000,
                                     model = req.model,
-                                    choices = listOf(
-                                        Choice(
-                                            index = 0,
-                                            message = Message(role = "assistant", content = responseText),
-                                            finishReason = "stop"
-                                        )
-                                    )
+                                    choices = listOf(choice)
                                 )
                                 call.respond(resp)
                             }
@@ -675,9 +714,10 @@ class LLMServerService : Service() {
      */
     private suspend fun runInferenceStreaming(
         conversation: Conversation,
-        prompt: String,
+        prompt: LlmMessage,
         writer: ByteWriteChannel,
         responseId: String,
+        requestEntryId: String,
         modelName: String,
         onChunk: (String) -> Unit = {}
     ) {
@@ -708,7 +748,12 @@ class LLMServerService : Service() {
             safeWrite("data: ${gson.toJson(initResp)}\n\n")
 
             var prev = ""
-            conversation.sendMessageAsync(Contents.of(prompt)).collect { msg ->
+            var lastToolCalls: List<ToolCall>? = null
+            conversation.sendMessageAsync(prompt, emptyMap()).collect { msg ->
+                // Track the most recent toolCalls snapshot — when a model decides
+                // to invoke a tool it shows up on the terminal message of the flow.
+                msg.toolCalls?.takeIf { it.isNotEmpty() }?.let { lastToolCalls = it }
+
                 val full = messageText(msg)
                 val delta = if (full.startsWith(prev) && full.length > prev.length) full.substring(prev.length)
                             else if (full == prev) ""
@@ -727,13 +772,41 @@ class LLMServerService : Service() {
                 }
             }
 
-            val finalResp = StreamResponse(
-                id = responseId,
-                `object` = "chat.completion.chunk",
-                created = System.currentTimeMillis() / 1000,
-                model = modelName,
-                choices = listOf(StreamChoice(0, StreamDelta(), "stop"))
-            )
+            val tc = lastToolCalls
+            val finalResp = if (!tc.isNullOrEmpty()) {
+                StreamResponse(
+                    id = responseId,
+                    `object` = "chat.completion.chunk",
+                    created = System.currentTimeMillis() / 1000,
+                    model = modelName,
+                    choices = listOf(
+                        StreamChoice(
+                            0,
+                            StreamDelta(
+                                toolCalls = tc.mapIndexed { i, t ->
+                                    ToolCallApi(
+                                        id = "call_${requestEntryId}_$i",
+                                        type = "function",
+                                        function = ToolCallFunction(
+                                            name = t.name,
+                                            arguments = gson.toJson(t.arguments)
+                                        )
+                                    )
+                                }
+                            ),
+                            "tool_calls"
+                        )
+                    )
+                )
+            } else {
+                StreamResponse(
+                    id = responseId,
+                    `object` = "chat.completion.chunk",
+                    created = System.currentTimeMillis() / 1000,
+                    model = modelName,
+                    choices = listOf(StreamChoice(0, StreamDelta(), "stop"))
+                )
+            }
             safeWrite("data: ${gson.toJson(finalResp)}\n\n")
             safeWrite("data: [DONE]\n\n")
         } finally {
@@ -745,9 +818,8 @@ class LLMServerService : Service() {
      * Non-streaming inference. Like [runInferenceStreaming], the conversation is
      * caller-owned. Caller is expected to hold [inferenceMutex].
      */
-    private fun runInferenceBlocking(conversation: Conversation, prompt: String): String {
-        val response = conversation.sendMessage(Contents.of(prompt), emptyMap())
-        return messageText(response)
+    private fun runInferenceBlocking(conversation: Conversation, prompt: LlmMessage): LlmMessage {
+        return conversation.sendMessage(prompt, emptyMap())
     }
 
     /**
@@ -808,6 +880,239 @@ class LLMServerService : Service() {
     }
 
     /**
+     * Build the LiteRT-LM [Content] list backing one API [Message]. Handles all
+     * three on-wire shapes for `content`:
+     *   - `null` (only valid for assistant messages w/ tool_calls — yields empty)
+     *   - JsonPrimitive string  → `[Content.Text(...)]`
+     *   - JsonArray of `{type:"text"|"image_url",...}` → mixed text/image
+     *
+     * Image URLs are decoded inline: `data:` are base64-decoded immediately;
+     * `http://localhost*` are fetched via OkHttp on the caller's thread, capped
+     * at 5 MB. Anything else throws [IllegalArgumentException] which the route
+     * handler converts to a 400.
+     *
+     * Images larger than 1024×1024 are downscaled with `inSampleSize` and
+     * re-encoded as JPEG@85% so prefill stays reasonable.
+     */
+    private fun buildContents(message: Message): List<Content> {
+        val parts = message.contentParts()
+        if (parts.isEmpty()) return emptyList()
+        val out = mutableListOf<Content>()
+        for (p in parts) {
+            when (p) {
+                is ContentPart.TextPart -> if (p.text.isNotEmpty()) out += Content.Text(p.text)
+                is ContentPart.ImagePart -> out += Content.ImageBytes(loadImageBytes(p.url))
+            }
+        }
+        return out
+    }
+
+    /** Lazy shared client for fetching `http://localhost*` image URLs. */
+    private val imageHttp: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .build()
+    }
+
+    private val maxImageBytes = 5L * 1024L * 1024L
+    private val maxImageDim = 1024
+
+    /**
+     * Decode an OpenAI `image_url.url` into JPEG bytes ready for LiteRT-LM.
+     * Strict allowlist: `data:` URLs and `http://localhost(:port)/...` only.
+     * Anything else is a 400 (SSRF protection — the model server shouldn't
+     * make outbound requests to arbitrary networks).
+     */
+    private fun loadImageBytes(url: String): ByteArray {
+        val raw: ByteArray = when {
+            url.startsWith("data:") -> {
+                val base64 = url.substringAfter("base64,", "")
+                if (base64.isEmpty()) {
+                    throw IllegalArgumentException("data: URL must be base64-encoded")
+                }
+                try {
+                    Base64.decode(base64, Base64.DEFAULT)
+                } catch (e: Exception) {
+                    throw IllegalArgumentException("Invalid base64 in data: URL: ${e.message}")
+                }
+            }
+            isLoopbackHttpUrl(url) -> {
+                val resp = imageHttp.newCall(OkRequest.Builder().url(url).build()).execute()
+                resp.use { r ->
+                    if (!r.isSuccessful) {
+                        throw IllegalArgumentException("Failed to fetch image_url: HTTP ${r.code}")
+                    }
+                    val cl = r.body?.contentLength() ?: -1L
+                    if (cl in 1..Long.MAX_VALUE && cl > maxImageBytes) {
+                        throw IllegalArgumentException("Image too large: $cl bytes (max $maxImageBytes)")
+                    }
+                    val src = r.body?.byteStream() ?: throw IllegalArgumentException("Empty body")
+                    val buf = ByteArrayOutputStream()
+                    val tmp = ByteArray(16 * 1024)
+                    var total = 0L
+                    while (true) {
+                        val n = src.read(tmp)
+                        if (n <= 0) break
+                        total += n
+                        if (total > maxImageBytes) {
+                            throw IllegalArgumentException("Image exceeds $maxImageBytes-byte cap")
+                        }
+                        buf.write(tmp, 0, n)
+                    }
+                    buf.toByteArray()
+                }
+            }
+            else -> throw IllegalArgumentException(
+                "image_url scheme not allowed; only data: and http://localhost are supported"
+            )
+        }
+        return downscaleIfNeeded(raw)
+    }
+
+    private fun isLoopbackHttpUrl(url: String): Boolean {
+        if (!url.startsWith("http://")) return false
+        val rest = url.removePrefix("http://")
+        val hostAndRest = rest.substringBefore('/')
+        val host = hostAndRest.substringBefore(':')
+        return host.equals("localhost", ignoreCase = true) || host == "127.0.0.1" || host == "[::1]"
+    }
+
+    /** Decode + downscale + re-encode JPEG if dimensions exceed [maxImageDim]. */
+    private fun downscaleIfNeeded(bytes: ByteArray): ByteArray {
+        val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, boundsOpts)
+        val w = boundsOpts.outWidth
+        val h = boundsOpts.outHeight
+        if (w <= 0 || h <= 0) {
+            throw IllegalArgumentException("Could not decode image (invalid format or corrupt bytes)")
+        }
+        if (w <= maxImageDim && h <= maxImageDim) return bytes
+
+        var sample = 1
+        while (w / sample > maxImageDim || h / sample > maxImageDim) sample *= 2
+
+        val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
+        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOpts)
+            ?: throw IllegalArgumentException("Image decode returned null")
+        val out = ByteArrayOutputStream()
+        try {
+            bmp.compress(Bitmap.CompressFormat.JPEG, 85, out)
+        } finally {
+            bmp.recycle()
+        }
+        return out.toByteArray()
+    }
+
+    /**
+     * Translate one API [Message] into a LiteRT-LM [LlmMessage]. Tool-related
+     * roles get special treatment:
+     *   - `role: "assistant"` with `tool_calls`: emitted as a model turn whose
+     *     `toolCalls` list mirrors what the model previously asked the client
+     *     to do (so the engine can stitch the conversation back together).
+     *   - `role: "tool"` with `content`: emitted as a tool turn with a
+     *     [Content.ToolResponse] carrying the serialized result string.
+     *
+     * Multi-part content (text + image) is preserved; plain string content
+     * collapses to a single [Content.Text].
+     */
+    private fun apiToLlmMessage(m: Message): LlmMessage {
+        return when (m.role) {
+            "assistant" -> {
+                val toolCalls = m.toolCalls?.map { tc ->
+                    ToolCall(tc.function.name, parseToolArguments(tc.function.arguments))
+                } ?: emptyList()
+                val contents = buildContents(m)
+                LlmMessage.Companion.model(
+                    Contents.of(contents),
+                    toolCalls,
+                    emptyMap()
+                )
+            }
+            "system" -> LlmMessage.Companion.system(
+                Contents.of(buildContents(m))
+            )
+            "tool" -> {
+                // OpenAI tool messages put the serialized result in `content`
+                // (typically a JSON-encoded string). Pass it straight through —
+                // the model will see whatever the client returned.
+                val payload = m.contentString() ?: (m.content?.toString() ?: "")
+                // We don't know which named tool produced the response in the
+                // OpenAI shape (it carries only `tool_call_id`). Use the
+                // tool_call_id as a best-effort name; the runtime treats it as
+                // a label.
+                val name = m.toolCallId ?: "tool"
+                LlmMessage.Companion.tool(
+                    Contents.of(Content.ToolResponse(name, payload))
+                )
+            }
+            else -> LlmMessage.Companion.user(Contents.of(buildContents(m)))
+        }
+    }
+
+    /** Parse an OpenAI `function.arguments` JSON string into a Kotlin map. */
+    private fun parseToolArguments(raw: String): Map<String, Any> {
+        if (raw.isBlank()) return emptyMap()
+        return try {
+            val el = JsonParser.parseString(raw)
+            if (!el.isJsonObject) emptyMap()
+            else el.asJsonObject.entrySet().associate { (k, v) -> k to jsonToAny(v) }
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
+    private fun jsonToAny(v: com.google.gson.JsonElement): Any {
+        return when {
+            v.isJsonNull -> ""
+            v.isJsonPrimitive -> {
+                val p = v.asJsonPrimitive
+                when {
+                    p.isBoolean -> p.asBoolean
+                    p.isNumber -> p.asNumber
+                    else -> p.asString
+                }
+            }
+            v.isJsonArray -> v.asJsonArray.map { jsonToAny(it) }
+            v.isJsonObject -> v.asJsonObject.entrySet().associate { (k, e) -> k to jsonToAny(e) }
+            else -> v.toString()
+        }
+    }
+
+    /**
+     * Build a LiteRT-LM [ToolProvider] from an OpenAI-shaped function definition.
+     * We construct an [OpenApiTool] whose `toolDescriptionJsonString` is the
+     * OpenAI parameters schema wrapped under the canonical
+     * `{name, description, parameters}` envelope LiteRT-LM expects.
+     *
+     * `automaticToolCalling` is disabled on the conversation, so [execute] is
+     * never actually called by the runtime — the model emits a `toolCall` and
+     * the server forwards it to the HTTP client. We still implement [execute]
+     * defensively so a future runtime version that auto-calls won't crash;
+     * it returns a "not implemented" JSON envelope.
+     */
+    private fun buildToolProvider(def: ToolDef): ToolProvider {
+        val name = def.function.name
+        val desc = def.function.description ?: ""
+        val params = def.function.parameters
+        val descJson = JsonObject().apply {
+            addProperty("name", name)
+            addProperty("description", desc)
+            add("parameters", params)
+        }
+        val openApi = object : OpenApiTool {
+            override fun getToolDescriptionJsonString(): String = descJson.toString()
+            override fun execute(paramsJsonString: String): String {
+                // Server-side execution is intentionally not implemented — the
+                // HTTP client owns tool execution. If the runtime ever calls
+                // this, return a structured error rather than throwing.
+                return "{\"error\":\"tool_execution_not_implemented\",\"tool\":\"$name\"}"
+            }
+        }
+        return tool(openApi)
+    }
+
+    /**
      * Build a fresh [Conversation] pre-loaded with the OpenAI-style chat history
      * minus the final user turn (which the caller will send via sendMessage).
      * System messages are collapsed into [ConversationConfig.systemInstruction];
@@ -820,7 +1125,8 @@ class LLMServerService : Service() {
         temperature: Float,
         topK: Int,
         systemText: String?,
-        initial: List<Message>
+        initial: List<Message>,
+        tools: List<ToolDef>?,
     ): Conversation {
         // LiteRT-LM enforces *one active Conversation per Engine*. If a prior
         // request's conversation didn't fully release (silent close() failure,
@@ -832,17 +1138,12 @@ class LLMServerService : Service() {
         purgeConversationsOnEngine(engineKey)
 
         val systemInstruction = systemText?.takeIf { it.isNotBlank() }?.let { Contents.of(it) }
-        val priorMessages = initial.map { m ->
-            when (m.role) {
-                "assistant" -> LlmMessage.Companion.model(Contents.of(m.content), emptyList(), emptyMap())
-                "system"    -> LlmMessage.Companion.system(m.content)
-                else        -> LlmMessage.Companion.user(m.content)
-            }
-        }
+        val priorMessages = initial.map { m -> apiToLlmMessage(m) }
+        val toolProviders: List<ToolProvider> = tools?.map { def -> buildToolProvider(def) } ?: emptyList()
         val cfg = ConversationConfig(
             systemInstruction,
             priorMessages,
-            emptyList(),                                       // tools
+            toolProviders,
             SamplerConfig(topK, /*topP=*/0.95, temperature.toDouble(), /*seed=*/0)
         )
         val conv = try {
@@ -898,10 +1199,15 @@ class LLMServerService : Service() {
      * duplicating the EngineConfig wiring.
      */
     private fun buildEngine(modelFile: File, maxTokens: Int?, backend: Backend): Engine {
+        // Always enable a CPU vision backend so multimodal image inputs can be
+        // served on the first request without a per-request engine rebuild.
+        // The init-time cost (~hundreds of MB resident, a few hundred ms extra
+        // initialize) is acceptable; not paying it would mean every first
+        // image request rebuilds the engine, which is far worse UX.
         val cfg = EngineConfig(
             modelFile.absolutePath,
             backend,
-            /*visionBackend=*/null,
+            /*visionBackend=*/Backend.CPU(),
             /*audioBackend=*/null,
             /*maxNumTokens=*/maxTokens,
             /*maxNumImages=*/null,
@@ -973,7 +1279,11 @@ class LLMServerService : Service() {
         for (i in 0 until n) {
             val m = messages[i]
             h = h * 31L + m.role.hashCode()
-            h = h * 31L + m.content.hashCode()
+            // Use the JSON serialization of content so the hash captures both
+            // string-shaped and array-shaped (multimodal) bodies equivalently.
+            h = h * 31L + (m.content?.toString()?.hashCode() ?: 0)
+            h = h * 31L + (m.toolCallId?.hashCode() ?: 0)
+            h = h * 31L + (m.toolCalls?.hashCode() ?: 0)
         }
         return h
     }
@@ -1001,20 +1311,35 @@ class LLMServerService : Service() {
         temperature: Float,
         topK: Int
     ): ResolvedSession {
-        val systemText = req.messages.firstOrNull { it.role == "system" }?.content
+        val systemText = req.messages.firstOrNull { it.role == "system" }?.contentString()
         val nonSystem = req.messages.filter { it.role != "system" }
-        if (nonSystem.isEmpty() || nonSystem.last().role != "user") {
-            throw IllegalArgumentException("Last message must have role=user")
+        if (nonSystem.isEmpty()) {
+            throw IllegalArgumentException("Request has no non-system messages")
         }
-        val lastUserPrompt = nonSystem.last().content
+        val last = nonSystem.last()
+        if (last.role != "user" && last.role != "tool") {
+            throw IllegalArgumentException("Last message must have role=user or role=tool")
+        }
+        val lastPrompt = apiToLlmMessage(last)
         val prior = nonSystem.dropLast(1)
+
+        // Honor `tool_choice: "none"` by suppressing the tools list entirely;
+        // the model can't invoke what it doesn't know about. `"auto"` and an
+        // object-form `{type:"function", function:{name:"..."}}` both pass the
+        // full set through (LiteRT-LM doesn't expose a single-tool selector,
+        // so the object form degrades to "auto").
+        val tools = req.tools?.takeIf {
+            val choice = req.toolChoice
+            !(choice != null && choice.isJsonPrimitive && choice.asJsonPrimitive.isString
+                && choice.asString.equals("none", ignoreCase = true))
+        }
 
         // Stateless path.
         if (req.sessionId.isNullOrEmpty()) {
-            val conversation = createConversation(handle.engine, handle.cacheKey, temperature, topK, systemText, prior)
+            val conversation = createConversation(handle.engine, handle.cacheKey, temperature, topK, systemText, prior, tools)
             return ResolvedSession(
                 conversation = conversation,
-                prompt = lastUserPrompt,
+                prompt = lastPrompt,
                 cacheKey = null,
                 engineKey = handle.cacheKey,
                 temperature = temperature,
@@ -1032,22 +1357,27 @@ class LLMServerService : Service() {
             cached.prefixHash == messagesPrefixHash(req.messages, cached.seenCount) &&
             run {
                 // The "new range" since the cached conversation last saw the client.
-                // Reuse is only safe when this contains exactly one user turn
-                // (the rest must be assistant turns already replayed back by the
-                // server, which the engine already has in its KV cache).
+                // Reuse is only safe when this contains exactly one *driving* turn
+                // (a user turn or a tool follow-up); the rest must be assistant
+                // turns the engine already has in its KV cache. Tool definitions
+                // can't be changed mid-conversation either — if the new request
+                // has tools and the cached conversation didn't (or vice versa)
+                // we don't bother trying to detect that here; a sampling-param
+                // change is the common case for "client changed semantics" and
+                // we just rebuild. (Tool-set changes will land in a later stage.)
                 val newRange = req.messages.subList(cached.seenCount, req.messages.size)
-                val nonAssistant = newRange.filter { it.role != "assistant" }
-                nonAssistant.size == 1 && nonAssistant[0].role == "user"
+                val driving = newRange.filter { it.role != "assistant" }
+                driving.size == 1 && (driving[0].role == "user" || driving[0].role == "tool")
             }
 
         if (canReuse) {
             cached!!
-            val newUser = req.messages.subList(cached.seenCount, req.messages.size)
+            val newDriving = req.messages.subList(cached.seenCount, req.messages.size)
                 .first { it.role != "assistant" }
-            LogManager.i("LLMServerService", "Session $cacheKey reused (sending 1 new user turn)")
+            LogManager.i("LLMServerService", "Session $cacheKey reused (sending 1 new ${newDriving.role} turn)")
             return ResolvedSession(
                 conversation = cached.conversation,
-                prompt = newUser.content,
+                prompt = apiToLlmMessage(newDriving),
                 cacheKey = cacheKey,
                 engineKey = handle.cacheKey,
                 temperature = temperature,
@@ -1058,10 +1388,10 @@ class LLMServerService : Service() {
         // Rebuild path — either no cache, sampling params changed, prefix
         // mismatched, or the client added something we can't merge in-place.
         if (cached != null) sessions.remove(cacheKey)
-        val conversation = createConversation(handle.engine, handle.cacheKey, temperature, topK, systemText, prior)
+        val conversation = createConversation(handle.engine, handle.cacheKey, temperature, topK, systemText, prior, tools)
         return ResolvedSession(
             conversation = conversation,
-            prompt = lastUserPrompt,
+            prompt = lastPrompt,
             cacheKey = cacheKey,
             engineKey = handle.cacheKey,
             temperature = temperature,

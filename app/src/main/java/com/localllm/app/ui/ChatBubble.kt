@@ -86,8 +86,16 @@ fun ChatBubble(
             onLongPress = copyOnLongPress,
         )
     } else {
+        // Assistant messages whose body is empty are usually tool-call placeholders
+        // — a model that decided to invoke a function returns no user-visible text
+        // before the call. The in-app client doesn't send `tools`, so this is a
+        // defensive render path; the wire-level API still surfaces the structured
+        // call to programmatic clients.
+        val content = if (msg.content.isEmpty() && !isStreaming) {
+            "[tool: pending — see API response]"
+        } else msg.content
         AssistantBubble(
-            content = msg.content,
+            content = content,
             time = time,
             isStreaming = isStreaming,
             lastDeltaLength = lastDeltaLength,

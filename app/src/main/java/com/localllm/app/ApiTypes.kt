@@ -1,5 +1,9 @@
 package com.localllm.app
 
+import com.google.gson.JsonArray
+import com.google.gson.JsonElement
+import com.google.gson.JsonObject
+import com.google.gson.JsonPrimitive
 import com.google.gson.annotations.SerializedName
 
 /**
@@ -9,12 +13,131 @@ import com.google.gson.annotations.SerializedName
  * Field names follow the OpenAI Chat Completions contract; @SerializedName
  * maps the snake_case JSON keys to camelCase Kotlin properties where they
  * differ.
+ *
+ * `Message.content` is intentionally [JsonElement] (Option 1 — polymorphic)
+ * because OpenAI's API now allows either:
+ *   - a plain string (`"content": "hello"`)
+ *   - an array of typed parts (`"content": [{"type":"text", ...}, {"type":"image_url", ...}]`)
+ *   - `null` on an assistant message that carries only `tool_calls`
+ * Inspect [Message.contentParts] / [Message.contentString] to dispatch.
  */
 
 data class Message(
     val role: String,
-    val content: String
+    /**
+     * Polymorphic per OpenAI: string, array of parts, or null (when the
+     * message is an assistant turn carrying only `tool_calls`, or a tool
+     * follow-up that puts its serialized payload in `content` as a string).
+     */
+    val content: JsonElement? = null,
+    @SerializedName("tool_calls") val toolCalls: List<ToolCallApi>? = null,
+    /** Present on `role: "tool"` follow-up turns; references the call id we emitted. */
+    @SerializedName("tool_call_id") val toolCallId: String? = null,
 )
+
+/** Convenience: returns the string form of [Message.content] iff it's a primitive. */
+fun Message.contentString(): String? {
+    val c = content ?: return null
+    return if (c.isJsonPrimitive && c.asJsonPrimitive.isString) c.asString else null
+}
+
+/** Convenience: returns parsed content parts, handling all three shapes. */
+fun Message.contentParts(): List<ContentPart> = content?.toContentParts() ?: emptyList()
+
+/** Aggregate character count across textual parts (used for prompt-size capping). */
+fun Message.textChars(): Int {
+    val c = content ?: return 0
+    return when {
+        c.isJsonNull -> 0
+        c.isJsonPrimitive -> if (c.asJsonPrimitive.isString) c.asString.length else c.toString().length
+        c.isJsonArray -> c.asJsonArray.sumOf { el ->
+            if (el.isJsonObject) {
+                val o = el.asJsonObject
+                when {
+                    o.has("text") && o["text"].isJsonPrimitive -> o["text"].asString.length
+                    else -> 0
+                }
+            } else 0
+        }
+        else -> 0
+    }
+}
+
+/**
+ * A typed content fragment after parsing [Message.content]. Mirrors the
+ * `{type, ...}` discriminated union OpenAI uses.
+ */
+sealed class ContentPart {
+    data class TextPart(val text: String) : ContentPart()
+    /** `url` is either `data:image/...;base64,...` or `http://localhost...`. */
+    data class ImagePart(val url: String) : ContentPart()
+}
+
+/**
+ * Decode any of the three `content` shapes into a uniform list of parts.
+ * - `JsonPrimitive(string)` → one [ContentPart.TextPart].
+ * - `JsonArray` → each element's `type` discriminator selects the variant.
+ * - anything else → empty list.
+ *
+ * Unknown `type` values are skipped (rather than erroring) — OpenAI is
+ * permissive about forward-compat parts; we don't want to 400 on a
+ * `{"type":"input_audio", ...}` we just don't understand.
+ */
+fun JsonElement.toContentParts(): List<ContentPart> {
+    if (isJsonPrimitive && asJsonPrimitive.isString) {
+        return listOf(ContentPart.TextPart(asString))
+    }
+    if (!isJsonArray) return emptyList()
+    val out = mutableListOf<ContentPart>()
+    for (el in asJsonArray) {
+        if (!el.isJsonObject) continue
+        val o = el.asJsonObject
+        val type = o["type"]?.takeIf { it.isJsonPrimitive }?.asString ?: continue
+        when (type) {
+            "text" -> {
+                val t = o["text"]?.takeIf { it.isJsonPrimitive }?.asString ?: continue
+                out += ContentPart.TextPart(t)
+            }
+            "image_url" -> {
+                val urlElem = o["image_url"] ?: continue
+                val url = when {
+                    urlElem.isJsonPrimitive -> urlElem.asString
+                    urlElem.isJsonObject -> urlElem.asJsonObject["url"]
+                        ?.takeIf { it.isJsonPrimitive }?.asString ?: continue
+                    else -> continue
+                }
+                out += ContentPart.ImagePart(url)
+            }
+            else -> { /* skip unknown */ }
+        }
+    }
+    return out
+}
+
+/** Helper to construct a string-shaped content quickly (used by tests + responses). */
+fun stringContent(s: String): JsonElement = JsonPrimitive(s)
+
+/** Helper to construct a parts-array content (used by tests). */
+fun partsContent(parts: List<ContentPart>): JsonElement {
+    val arr = JsonArray()
+    for (p in parts) {
+        val o = JsonObject()
+        when (p) {
+            is ContentPart.TextPart -> {
+                o.addProperty("type", "text")
+                o.addProperty("text", p.text)
+            }
+            is ContentPart.ImagePart -> {
+                o.addProperty("type", "image_url")
+                val urlObj = JsonObject()
+                urlObj.addProperty("url", p.url)
+                o.add("image_url", urlObj)
+            }
+        }
+        arr.add(o)
+    }
+    return arr
+}
 
 data class ChatRequest(
     val model: String,
@@ -30,7 +153,38 @@ data class ChatRequest(
     @SerializedName("session_id") val sessionId: String? = null,
     val temperature: Float? = null,
     @SerializedName("top_k") val topK: Int? = null,
-    @SerializedName("max_tokens") val maxTokens: Int? = null
+    @SerializedName("max_tokens") val maxTokens: Int? = null,
+    /** OpenAI function/tool definitions advertised to the model. */
+    val tools: List<ToolDef>? = null,
+    /**
+     * `"auto"` (default behavior), `"none"`, or `{"type":"function","function":{"name":"..."}}`.
+     * Polymorphic on the wire, so we hold it as a raw [JsonElement] and
+     * inspect at the call site.
+     */
+    @SerializedName("tool_choice") val toolChoice: JsonElement? = null,
+)
+
+data class ToolDef(
+    val type: String = "function",
+    val function: FunctionDef,
+)
+
+data class FunctionDef(
+    val name: String,
+    val description: String? = null,
+    val parameters: JsonObject,
+)
+
+data class ToolCallApi(
+    val id: String,
+    val type: String = "function",
+    val function: ToolCallFunction,
+)
+
+/** `arguments` is a JSON-encoded string per the OpenAI contract — NOT a JsonObject. */
+data class ToolCallFunction(
+    val name: String,
+    val arguments: String,
 )
 
 data class ChatResponse(
@@ -63,7 +217,8 @@ data class StreamChoice(
 
 data class StreamDelta(
     val role: String? = null,
-    val content: String? = null
+    val content: String? = null,
+    @SerializedName("tool_calls") val toolCalls: List<ToolCallApi>? = null,
 )
 
 data class ErrorResponse(val error: ErrorDetails)

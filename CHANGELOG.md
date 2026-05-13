@@ -6,7 +6,94 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Nothing yet.
+Stage 1 of the AI roadmap. Two coherent additions to the OpenAI-compatible
+HTTP API that both already had runtime support: function/tool calling and
+multimodal image input.
+
+### Added
+
+#### Tool / function calling
+
+- **`POST /v1/chat/completions` accepts OpenAI-shaped `tools` + `tool_choice`.**
+  Each `ToolDef` (`type` + `function: {name, description, parameters}`) is
+  wrapped as a LiteRT-LM `OpenApiTool` (one tool per provider) and threaded
+  into `ConversationConfig.tools`. `tool_choice` is honored at the gateway:
+  `"none"` strips tools before the conversation is built; `"auto"` and the
+  `{type:"function", function:{name:"..."}}` object form both pass the full
+  set through (LiteRT-LM does not expose a single-tool selector, so the
+  object form degrades to "auto").
+- **Server returns `tool_calls` and `finish_reason: "tool_calls"`** when the
+  model elects to invoke a function. Each LiteRT-LM `ToolCall` is translated
+  into a `ToolCallApi` with a stable-ish ID (`call_${entry.id}_${index}`),
+  `type: "function"`, and `function: {name, arguments}` where `arguments` is
+  the JSON-encoded argument map per the OpenAI contract.
+- **Streaming path emits a final `delta.tool_calls` chunk** with
+  `finish_reason: "tool_calls"` instead of `"stop"` when a tool call lands.
+  Text deltas still stream as before for messages that mix text + tool use.
+- **Two-turn protocol round-trips correctly.** `role: "tool"` follow-up
+  messages with `tool_call_id` and a serialized `content` are translated to
+  a LiteRT-LM `Role.TOOL` message carrying a `Content.ToolResponse`. The
+  session-reuse path treats a single new `tool` turn the same as a single
+  new `user` turn so the KV cache survives the round trip.
+- **`automaticToolCalling = false`** on the conversation — the server
+  forwards the tool call to the HTTP client rather than executing it
+  in-process. (The `OpenApiTool.execute` shim is implemented defensively to
+  return a structured error if the runtime ever tries to auto-call it.)
+
+#### Multimodal image input
+
+- **`POST /v1/chat/completions` accepts the OpenAI `content` array** with
+  `{type:"text",...}` and `{type:"image_url",...}` parts. Plain string
+  content still works unchanged (polymorphic `JsonElement` on the wire,
+  inspected at the call site).
+- **`data:image/...;base64,...` URLs** decode immediately to bytes via
+  `android.util.Base64`. **`http://localhost(:port)/...` URLs** are fetched
+  via OkHttp with a 5 MB cap, 10s read timeout. Every other scheme — public
+  HTTP, file:, custom schemes — is rejected with a 400 for SSRF
+  protection.
+- **Image downscaling**: any image exceeding 1024×1024 is decoded with
+  `BitmapFactory.inSampleSize` and re-encoded as JPEG@85% before being
+  handed to LiteRT-LM. Saves prefill time on phone-camera-sized inputs.
+- **`EngineConfig.visionBackend = Backend.CPU()`** is now always set.
+  Adds a small startup cost (~hundreds of MB resident, a few hundred ms
+  init) so the first multimodal request doesn't have to rebuild the engine.
+
+#### API types
+
+- **`Message.content` is now polymorphic (`JsonElement?`)** — string,
+  parts array, or null. Backwards-compatible: existing text-only clients
+  see no behavior change.
+- **New types**: `ToolDef`, `FunctionDef`, `ToolCallApi`, `ToolCallFunction`,
+  sealed `ContentPart.{TextPart, ImagePart}`, plus extension helpers
+  `Message.contentString()`, `Message.contentParts()`, `Message.textChars()`,
+  and `JsonElement.toContentParts()`.
+- **`StreamDelta`** gains an optional `tool_calls` field for the streaming
+  tool-call emission.
+
+### Changed
+
+- **Prompt-size cap** now counts characters across `text` parts rather than
+  the old `content.length`. Image parts don't contribute to the limit.
+- **`messagesPrefixHash`** mixes in `tool_call_id` and `tool_calls` so a
+  client that swaps a tool turn mid-session correctly invalidates the
+  cached conversation.
+- **`runInferenceBlocking`** returns a `LlmMessage` (not just text) so the
+  route handler can inspect `toolCalls` and choose the right `finish_reason`.
+  `runInferenceStreaming` similarly tracks the last non-empty `toolCalls`
+  snapshot of the Flow.
+- **`ChatBubble`** renders a `[tool: pending — see API response]` placeholder
+  for empty assistant messages (defensive — the in-app Chat tab doesn't
+  send `tools`, so this is reachable only when an external client drives
+  the local server).
+
+### Tests
+
+- **`app/src/test/java/com/localllm/app/ApiTypesTest.kt`** — pure-JVM Gson
+  round-trip tests for both polymorphic content shapes (string + parts
+  array), null content on tool-call assistant messages, `tool` follow-up
+  turns, `tools` + `tool_choice` envelope deserialization, and a stable
+  tool-call response shape. Verifies the v1.1.0 text-only request contract
+  is preserved byte-for-byte.
 
 ## [1.1.0] — 2026-05-12
 
