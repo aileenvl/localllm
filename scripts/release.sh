@@ -64,9 +64,18 @@ fi
 echo "==> assembleDebug"
 ./gradlew :app:assembleDebug --no-daemon --console=plain
 
-APK="app/build/outputs/apk/debug/app-debug.apk"
-if [[ ! -f "$APK" ]]; then
-    echo "error: expected APK at $APK; build must have failed silently" >&2
+# Per-ABI splits land alongside the universal APK in app/build/outputs/apk/debug/.
+# We attach both the arm64-v8a (smaller, real-device) and universal (sideload
+# convenience) APKs to the release so users can pick.
+APK_DIR="app/build/outputs/apk/debug"
+APK_ARM64="$APK_DIR/app-arm64-v8a-debug.apk"
+APK_UNIVERSAL="$APK_DIR/app-universal-debug.apk"
+APKS=()
+[[ -f "$APK_ARM64" ]]     && APKS+=("$APK_ARM64")
+[[ -f "$APK_UNIVERSAL" ]] && APKS+=("$APK_UNIVERSAL")
+if [[ ${#APKS[@]} -eq 0 ]]; then
+    echo "error: no APKs produced under $APK_DIR; build must have failed silently" >&2
+    ls -la "$APK_DIR" >&2 || true
     exit 1
 fi
 
@@ -86,7 +95,7 @@ gh release create "$TAG" \
     --target "$(git branch --show-current)" \
     --title "LocalLLM $TAG" \
     --notes "$NOTES" \
-    "$APK"
+    "${APKS[@]}"
 
 echo
 echo "Done. Release: https://github.com/mlnomadpy/localllm/releases/tag/$TAG"
