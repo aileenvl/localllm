@@ -6,6 +6,10 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [1.2.0] — 2026-05-13
+
 Stage 1 of the AI roadmap. Two coherent additions to the OpenAI-compatible
 HTTP API that both already had runtime support: function/tool calling and
 multimodal image input.
@@ -86,14 +90,48 @@ multimodal image input.
   send `tools`, so this is reachable only when an external client drives
   the local server).
 
+### Fixed during the v1.2.0 cycle
+
+- **`automaticToolCalling = false` is now passed explicitly.** LiteRT-LM
+  0.11.0's 4-arg `ConversationConfig` overload defaults this to **true**,
+  not false as the initial Stage 1 implementation assumed. The runtime
+  was auto-executing our `OpenApiTool.execute()` stub instead of
+  surfacing the tool call to the HTTP client. The OpenAI contract is
+  "model emits `tool_calls`, client executes, client sends a `role:tool`
+  follow-up" — and that round-trip now works as designed.
+- **Better `ChatRequest` parse-error logging.** Root-cause exception
+  class + message surface in the 400 response and via `LogManager.e`
+  instead of Ktor's opaque "Failed to convert request body".
+
+### Extracted helpers
+
+- `MessageHelpers.kt` collects five pure top-level functions
+  (`messagesPrefixHash`, `isLoopbackHttpUrl`, `decodeDataImageUrl`,
+  `parseToolArguments`, `jsonToAny`, `buildToolDescriptionJson`) extracted
+  from `LLMServerService.kt` so they're independently unit-testable on
+  the JVM without spinning up the Service or LiteRT-LM JNI.
+- Fixed an IPv6 bracket-notation bug in `isLoopbackHttpUrl` discovered
+  via the new tests — `http://[::1]/img` was previously mis-rejected.
+
 ### Tests
 
-- **`app/src/test/java/com/localllm/app/ApiTypesTest.kt`** — pure-JVM Gson
-  round-trip tests for both polymorphic content shapes (string + parts
-  array), null content on tool-call assistant messages, `tool` follow-up
-  turns, `tools` + `tool_choice` envelope deserialization, and a stable
-  tool-call response shape. Verifies the v1.1.0 text-only request contract
-  is preserved byte-for-byte.
+- **`ApiTypesTest.kt`** — pure-JVM Gson round-trip tests for both
+  polymorphic content shapes (string + parts array), null content on
+  tool-call assistant messages, `tool` follow-up turns, `tools` +
+  `tool_choice` envelope deserialization, tool-call response shape. 11
+  cases. Verifies the v1.1.0 text-only request contract is preserved
+  byte-for-byte.
+- **`MessageHelpersTest.kt`** — 25 cases covering the extracted helpers.
+  Total project test count is now 77, all green.
+
+### End-to-end verification on Pixel 6 (Tensor G1, CPU backend)
+
+- Tool calling: round 1 emits `finish_reason: "tool_calls"` +
+  `tool_calls[0].function.name = "get_weather"`; round 2 with a
+  `role: "tool"` follow-up produces a natural-language answer using the
+  injected result.
+- Multimodal image: 3.2 KB JPEG → vision encoder → text description
+  correctly identifying the colors and overlaid text.
 
 ## [1.1.0] — 2026-05-12
 
