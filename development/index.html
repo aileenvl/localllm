@@ -600,6 +600,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#baseline-profiles-macrobenchmark" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Baseline profiles &amp; macrobenchmark
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#continuous-integration" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -644,13 +655,52 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#building-from-source-for-distribution" class="md-nav__link">
+  <a href="#release-builds-and-signing" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Building from source for distribution
+        Release builds and signing
       
     </span>
   </a>
+  
+    <nav class="md-nav" aria-label="Release builds and signing">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#one-time-keystore-setup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One-time keystore setup
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#build-outputs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Build outputs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#litert-lm-abi-gotcha" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LiteRT-LM ABI gotcha
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -766,6 +816,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#baseline-profiles-macrobenchmark" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Baseline profiles &amp; macrobenchmark
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#continuous-integration" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -810,13 +871,52 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#building-from-source-for-distribution" class="md-nav__link">
+  <a href="#release-builds-and-signing" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Building from source for distribution
+        Release builds and signing
       
     </span>
   </a>
+  
+    <nav class="md-nav" aria-label="Release builds and signing">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#one-time-keystore-setup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One-time keystore setup
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#build-outputs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Build outputs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#litert-lm-abi-gotcha" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LiteRT-LM ABI gotcha
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -972,10 +1072,32 @@ attempt), set <strong>Settings → Backend → CPU</strong>.</p>
 verification is a manual <code>curl</code> against a real <code>adb forward</code>. If you
 add an <code>androidTest</code> source set, expect the model fixture to be the
 hard part — a 2.6 GB binary blob doesn't belong in git.</p>
+<h2 id="baseline-profiles-macrobenchmark">Baseline profiles &amp; macrobenchmark<a class="headerlink" href="#baseline-profiles-macrobenchmark" title="Permanent link">&para;</a></h2>
+<p>The <code>:macrobenchmark</code> module (under <code>macrobenchmark/</code>) holds the
+Macrobenchmark + Baseline Profile generator. It uses the <code>com.android.test</code>
+plugin and <code>androidx.baselineprofile</code>, targets <code>:app</code> via
+<code>targetProjectPath = ":app"</code>, and runs alongside the target with
+<code>android.experimental.self-instrumenting = true</code>.</p>
+<p>Two test classes are wired up:</p>
+<ul>
+<li><code>StartupBenchmark</code> — cold-start <code>StartupTimingMetric</code> with
+  <code>CompilationMode.None / Partial / Full</code>, five iterations each.</li>
+<li><code>BaselineProfileGenerator</code> — walks Catalog → Dashboard → Console
+  → Chat → Settings so the produced profile covers the hot
+  composables.</li>
+</ul>
+<p>Both require a <strong>connected device</strong> (USB or wireless ADB) — they
+are not part of <code>assembleDebug</code>. To regenerate the profile:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>./gradlew<span class="w"> </span>:app:generateReleaseBaselineProfile
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="c1"># Outputs app/src/main/baseline-prof.txt, consumed by R8 at release-build time.</span>
+</code></pre></div>
+<p>Baseline profiles <strong>only</strong> apply to release builds (R8-compiled),
+so the perf win is invisible in <code>:app:assembleDebug</code> — ship a
+release variant to feel it.</p>
 <h2 id="continuous-integration">Continuous integration<a class="headerlink" href="#continuous-integration" title="Permanent link">&para;</a></h2>
 <p><code>.github/workflows/build.yml</code> runs on every push and PR against
 <code>main</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./gradlew lint testDebugUnitTest assembleDebug --no-daemon --stacktrace</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./gradlew lint testDebugUnitTest assembleDebug --no-daemon --stacktrace</span>
 </code></pre></div>
 <p>Gradle is cached on <code>gradle/libs.versions.toml</code> + <code>**/*.gradle.kts</code>.
 Lint report + the debug APK are uploaded as workflow artifacts (14
@@ -987,7 +1109,7 @@ runner.</p>
 <p>The hosting account has Actions administratively restricted
 (Trust &amp; Safety review in progress with GitHub Support). While
 that's pending, <strong>CI parity is enforced locally</strong>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>./gradlew<span class="w"> </span>lint<span class="w"> </span>testDebugUnitTest<span class="w"> </span>assembleDebug<span class="w"> </span>--no-daemon
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>./gradlew<span class="w"> </span>lint<span class="w"> </span>testDebugUnitTest<span class="w"> </span>assembleDebug<span class="w"> </span>--no-daemon
 </code></pre></div>
 <p>Contributors run this before opening a PR; maintainers run the
 same command before merging. The <code>build.yml</code> workflow stays in
@@ -998,11 +1120,11 @@ changes needed.</p>
 <p>The mkdocs Material site publishes to GitHub Pages from the
 <code>gh-pages</code> branch (legacy branch-source mode, bypassing Actions).
 One-time setup per machine:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>python3<span class="w"> </span>-m<span class="w"> </span>venv<span class="w"> </span>.venv-docs
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>.venv-docs/bin/pip<span class="w"> </span>install<span class="w"> </span>-r<span class="w"> </span>docs/requirements.txt
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>python3<span class="w"> </span>-m<span class="w"> </span>venv<span class="w"> </span>.venv-docs
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>.venv-docs/bin/pip<span class="w"> </span>install<span class="w"> </span>-r<span class="w"> </span>docs/requirements.txt
 </code></pre></div>
 <p>To publish the current <code>docs/</code> state:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>.venv-docs/bin/mkdocs<span class="w"> </span>gh-deploy<span class="w"> </span>--force<span class="w"> </span>--remote-branch<span class="w"> </span>gh-pages
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>.venv-docs/bin/mkdocs<span class="w"> </span>gh-deploy<span class="w"> </span>--force<span class="w"> </span>--remote-branch<span class="w"> </span>gh-pages
 </code></pre></div>
 <p>That builds the site, commits to <code>gh-pages</code>, and pushes. Pages picks
 it up within a minute at the repo's custom domain
@@ -1011,7 +1133,7 @@ flip Pages source back to "GitHub Actions" and the existing
 <code>docs.yml</code> workflow takes over.</p>
 <h2 id="cutting-a-release">Cutting a release<a class="headerlink" href="#cutting-a-release" title="Permanent link">&para;</a></h2>
 <p>One command:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>./scripts/release.sh<span class="w"> </span>v1.2.3
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>./scripts/release.sh<span class="w"> </span>v1.2.3
 </code></pre></div>
 <p><code>scripts/release.sh</code> (see source for details):</p>
 <ol>
@@ -1054,38 +1176,64 @@ contract:</p>
    emit a <code>writeSseError</code> chunk on failure — <em>don't</em> try to
    <code>call.respond</code> after headers have committed.</li>
 </ol>
-<h2 id="building-from-source-for-distribution">Building from source for distribution<a class="headerlink" href="#building-from-source-for-distribution" title="Permanent link">&para;</a></h2>
-<p>This APK is not currently shipped to the Play Store. For your own
-sideload distribution:</p>
-<ol>
-<li>
-<p>Generate a release keystore (one-time):
-   <div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>keytool<span class="w"> </span>-genkey<span class="w"> </span>-v<span class="w"> </span>-keystore<span class="w"> </span>release.keystore<span class="w"> </span>-alias<span class="w"> </span>localllm<span class="w"> </span><span class="se">\</span>
-<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="w">  </span>-keyalg<span class="w"> </span>RSA<span class="w"> </span>-keysize<span class="w"> </span><span class="m">4096</span><span class="w"> </span>-validity<span class="w"> </span><span class="m">10000</span>
-</code></pre></div></p>
-</li>
-<li>
-<p>Add a <code>signingConfigs.release</code> block to <code>app/build.gradle.kts</code>
-   pointing at it. <strong>Don't commit the keystore.</strong> Read the
-   passwords from environment variables or <code>~/.gradle/gradle.properties</code>.</p>
-</li>
-<li>
-<p>Set <code>isMinifyEnabled = true</code> in the release <code>buildTypes</code> block.
-   The <code>proguard-rules.pro</code> file already has keeps for LiteRT-LM,
-   Ktor, Netty, Gson, Compose, and our <code>ApiTypes.kt</code> data classes —
-   verify with <code>./gradlew :app:assembleRelease</code> and a smoke-test on
-   device.</p>
-</li>
-<li>
-<p>Distribute via the
-   <a href="https://github.com/mlnomadpy/localllm/releases">GitHub Releases page</a>
-   or your own channel.</p>
-</li>
-</ol>
-<p>If you want <strong>Play Store distribution</strong>, add Crashlytics or Sentry,
-target <code>targetSdk = 35</code>, audit
-<code>Settings.allowCors</code> defaults, and replace the in-memory <code>LogManager</code>
-ring buffer with a persistent crash log. None of that is in tree yet.</p>
+<h2 id="release-builds-and-signing">Release builds and signing<a class="headerlink" href="#release-builds-and-signing" title="Permanent link">&para;</a></h2>
+<p>The release build pipeline is wired in <code>app/build.gradle.kts</code>:</p>
+<ul>
+<li><code>isMinifyEnabled = true</code> + <code>isShrinkResources = true</code> — R8 + the
+  resource shrinker run on every <code>:app:assembleRelease</code>.</li>
+<li><code>signingConfigs.release</code> reads four properties from
+  <code>~/.gradle/gradle.properties</code> <em>or</em> environment variables. If any of
+  the four is missing the config is silently empty and the release
+  build falls back to the <strong>debug</strong> signing key, so
+  <code>:app:assembleRelease</code> completes for every contributor without
+  needing access to the production keystore.</li>
+<li><code>splits.abi</code> ships per-ABI APKs for <code>arm64-v8a</code> plus a universal
+  APK (<code>isUniversalApk = true</code>). <code>armeabi-v7a</code> and the x86 family are
+  intentionally dropped — see the gotcha below.</li>
+</ul>
+<h3 id="one-time-keystore-setup">One-time keystore setup<a class="headerlink" href="#one-time-keystore-setup" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>keytool<span class="w"> </span>-genkey<span class="w"> </span>-v<span class="w"> </span>-keystore<span class="w"> </span>localllm-release.keystore<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="w">  </span>-alias<span class="w"> </span>localllm<span class="w"> </span>-keyalg<span class="w"> </span>RSA<span class="w"> </span>-keysize<span class="w"> </span><span class="m">4096</span><span class="w"> </span>-validity<span class="w"> </span><span class="m">10000</span>
+</code></pre></div>
+<p>Move it somewhere outside the repo (the project <code>.gitignore</code> blocks
+<code>*.keystore</code> and <code>*.jks</code>, but keeping it out of the source tree is
+safer still). Then add the four properties to your <strong>user-level</strong>
+<code>~/.gradle/gradle.properties</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="na">LOCALLLM_KEYSTORE_PATH</span><span class="o">=</span><span class="s">/Users/you/keys/localllm-release.keystore</span>
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="na">LOCALLLM_KEYSTORE_PASSWORD</span><span class="o">=</span><span class="s">********</span>
+<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="na">LOCALLLM_KEY_ALIAS</span><span class="o">=</span><span class="s">localllm</span>
+<a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a><span class="na">LOCALLLM_KEY_PASSWORD</span><span class="o">=</span><span class="s">********</span>
+</code></pre></div>
+<p>Environment variables with the same names also work — handy for CI.
+If both are set, the Gradle property wins.</p>
+<h3 id="build-outputs">Build outputs<a class="headerlink" href="#build-outputs" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>./gradlew<span class="w"> </span>:app:assembleRelease<span class="w">   </span><span class="c1"># per-ABI + universal APKs</span>
+<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>./gradlew<span class="w"> </span>:app:bundleRelease<span class="w">     </span><span class="c1"># .aab for Play Store / Internal App Sharing</span>
+</code></pre></div>
+<p><code>app/build/outputs/apk/release/</code> will contain:</p>
+<ul>
+<li><code>app-arm64-v8a-release.apk</code> — per-ABI, smallest (~28 MB)</li>
+<li><code>app-universal-release.apk</code> — fat APK with all included ABIs (~39 MB)</li>
+</ul>
+<p>Verify the JNI payload of each split:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>unzip<span class="w"> </span>-l<span class="w"> </span>app/build/outputs/apk/release/app-arm64-v8a-release.apk<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span><span class="s1">&#39;\.so$&#39;</span>
+</code></pre></div>
+<p>Only <code>lib/arm64-v8a/...</code> entries should appear in the per-ABI APK.</p>
+<h3 id="litert-lm-abi-gotcha">LiteRT-LM ABI gotcha<a class="headerlink" href="#litert-lm-abi-gotcha" title="Permanent link">&para;</a></h3>
+<p>The <code>com.google.ai.edge.litertlm:litertlm-android:0.11.0</code> AAR ships
+JNI <code>.so</code> files for <strong><code>arm64-v8a</code> and <code>x86_64</code> only</strong>:</p>
+<ul>
+<li><code>lib/arm64-v8a/</code>: <code>libLiteRt.so</code>, <code>libLiteRtClGlAccelerator.so</code>,
+  <code>liblitertlm_jni.so</code></li>
+<li><code>lib/x86_64/</code>: same three libs (emulator-only convenience)</li>
+<li><code>lib/armeabi-v7a/</code>: <strong>none</strong> — LiteRT-LM doesn't target 32-bit ARM.</li>
+</ul>
+<p><code>splits.abi.include</code> is set to <code>arm64-v8a</code> only. Re-adding
+<code>armeabi-v7a</code> would produce an APK that crashes on first inference
+with <code>UnsatisfiedLinkError</code>. <code>x86_64</code> is omitted from the per-ABI
+split list because emulator inference is unusably slow, but the
+<strong>universal APK still carries x86_64</strong> so an emulator install via
+the universal APK works for smoke tests.</p>
 <h2 id="roadmap">Roadmap<a class="headerlink" href="#roadmap" title="Permanent link">&para;</a></h2>
 <p>Tracked in <a href="https://github.com/mlnomadpy/localllm/issues">GitHub Issues</a>.
 Big items:</p>
