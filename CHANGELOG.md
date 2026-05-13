@@ -8,6 +8,27 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+#### SoC-specific NPU model variants in the Catalog
+
+- Catalog now lists the **seven NPU-compiled Gemma 3 1B `.litertlm` files**
+  Google publishes at `huggingface.co/litert-community/Gemma3-1B-IT`:
+  - Qualcomm Snapdragon: SM8550 (8 Gen 2), SM8650 (8 Gen 3), SM8750 (8 Elite),
+    SM8850 (8 Elite Gen 5) — ~690 MB each
+  - MediaTek Dimensity: MT6989 (9300), MT6991 (9400), MT6993 (9500) —
+    ~1.03 GB each
+- `ModelInfo` gains a `requiredSocMarker: String?` field; non-null entries
+  are NPU-gated. `npuSocLabel()` produces a human-readable SoC chip
+  ("Snapdragon 8 Elite (SM8750)") and `matchesCurrentSoc()` checks against
+  `Build.SOC_MODEL` (API 31+).
+- Catalog cards render a Memory-icon chip for NPU entries; when the chip
+  matches the device's SoC it switches to the tertiary container colour
+  with a "· matches your device" suffix, so a Qualcomm/MediaTek user spots
+  their one-tap variant immediately.
+
+SHA-256 left null for these entries — verifying all seven requires
+downloading ~6 GB; lock them in opportunistically as users report
+successful runs.
+
 #### NPU/TPU backend pill in Settings
 
 - **`Backend.NPU(nativeLibraryDir)`** wired into both the explicit backend

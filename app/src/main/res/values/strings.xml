@@ -29,6 +29,7 @@
     <string name="models_progress_percent">%1$d%%</string>
     <string name="models_sha_verified">SHA-256 verified</string>
     <string name="models_sha_unverified">Unverified</string>
+    <string name="models_npu_match">%1$s · matches your device</string>
     <string name="models_metadata_line">%1$s · last used %2$s</string>
     <string name="models_empty_title">Get started</string>
     <string name="models_empty_body">Pick a model below to download. Gemma 4 E2B is the fastest option on this device.</string>

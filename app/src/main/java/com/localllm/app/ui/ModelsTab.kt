@@ -41,8 +41,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.background
+import androidx.compose.material.icons.outlined.Memory
 import com.localllm.app.AVAILABLE_MODELS
 import com.localllm.app.ModelInfo
+import com.localllm.app.matchesCurrentSoc
+import com.localllm.app.npuSocLabel
 import com.localllm.app.R
 
 @Composable
@@ -229,6 +233,41 @@ private fun ModelCard(
                             text = stringResource(R.string.models_sha_unverified),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            // NPU SoC chip — only shown for NPU-gated catalog entries.
+            // Tinted differently when the chip matches the current device's
+            // SoC, so a Qualcomm user sees their compatible variant at a glance.
+            model.npuSocLabel()?.let { label ->
+                Spacer(modifier = Modifier.height(6.dp))
+                val matches = model.matchesCurrentSoc()
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .background(
+                                if (matches) MaterialTheme.colorScheme.tertiaryContainer
+                                else MaterialTheme.colorScheme.surfaceVariant,
+                                RoundedCornerShape(6.dp)
+                            )
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Memory,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = if (matches) MaterialTheme.colorScheme.onTertiaryContainer
+                            else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (matches) stringResource(R.string.models_npu_match, label) else label,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (matches) MaterialTheme.colorScheme.onTertiaryContainer
+                            else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
