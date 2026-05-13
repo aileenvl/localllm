@@ -304,4 +304,69 @@ class ApiTypesTest {
         assertNull(req.tools)
         assertNull(req.toolChoice)
     }
+
+    /* ---------- embeddings wire shapes ---------- */
+
+    @Test
+    fun `embeddings input as a single string`() {
+        val req = gson.fromJson(
+            """{"input":"hello","model":"bge-small-en-v1.5"}""",
+            EmbeddingRequest::class.java
+        )
+        assertEquals(listOf("hello"), req.inputStrings())
+        assertEquals("bge-small-en-v1.5", req.model)
+        assertNull(req.encodingFormat)
+    }
+
+    @Test
+    fun `embeddings input as an array of strings`() {
+        val req = gson.fromJson(
+            """{"input":["a","b","c"],"model":"bge-small-en-v1.5","encoding_format":"float"}""",
+            EmbeddingRequest::class.java
+        )
+        assertEquals(listOf("a", "b", "c"), req.inputStrings())
+        assertEquals("float", req.encodingFormat)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `embeddings rejects empty input array`() {
+        gson.fromJson(
+            """{"input":[],"model":"m"}""",
+            EmbeddingRequest::class.java
+        ).inputStrings()
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `embeddings rejects non-string array entries`() {
+        gson.fromJson(
+            """{"input":[1,2,3],"model":"m"}""",
+            EmbeddingRequest::class.java
+        ).inputStrings()
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `embeddings rejects numeric input`() {
+        gson.fromJson(
+            """{"input":42,"model":"m"}""",
+            EmbeddingRequest::class.java
+        ).inputStrings()
+    }
+
+    @Test
+    fun `embedding response serializes with snake_case usage fields`() {
+        val resp = EmbeddingResponse(
+            data = listOf(EmbeddingData(embedding = floatArrayOf(0.1f, 0.2f), index = 0)),
+            model = "bge-small-en-v1.5",
+            usage = EmbeddingUsage(promptTokens = 7, totalTokens = 7),
+        )
+        val obj = JsonParser.parseString(gson.toJson(resp)).asJsonObject
+        assertEquals("list", obj["object"].asString)
+        val d0 = obj["data"].asJsonArray[0].asJsonObject
+        assertEquals("embedding", d0["object"].asString)
+        assertEquals(0, d0["index"].asInt)
+        assertEquals(2, d0["embedding"].asJsonArray.size())
+        val usage = obj["usage"].asJsonObject
+        assertEquals(7, usage["prompt_tokens"].asInt)
+        assertEquals(7, usage["total_tokens"].asInt)
+    }
 }

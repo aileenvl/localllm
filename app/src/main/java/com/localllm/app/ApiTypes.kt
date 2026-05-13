@@ -240,3 +240,60 @@ data class ModelData(
     val created: Long = 0,
     @SerializedName("owned_by") val ownedBy: String = "local"
 )
+
+/**
+ * `POST /v1/embeddings` request. Per OpenAI:
+ *   - `input` is polymorphic: a single string OR an array of strings
+ *     (arrays of token-id lists are not supported on this server)
+ *   - `model` selects the embedding model id (e.g. "bge-small-en-v1.5")
+ *   - `encoding_format` defaults to "float"; "base64" is not implemented
+ *     (we return 400 if the client asks for it)
+ */
+data class EmbeddingRequest(
+    val input: JsonElement,
+    val model: String,
+    @SerializedName("encoding_format") val encodingFormat: String? = null,
+    val user: String? = null,
+)
+
+/**
+ * Normalised view of [EmbeddingRequest.input]. Throws [IllegalArgumentException]
+ * for shapes we don't accept (numbers, nested arrays, nulls, empty strings).
+ */
+fun EmbeddingRequest.inputStrings(): List<String> {
+    val el = input
+    return when {
+        el.isJsonPrimitive && el.asJsonPrimitive.isString -> listOf(el.asString)
+        el.isJsonArray -> {
+            val arr = el.asJsonArray
+            require(arr.size() > 0) { "input array must not be empty" }
+            arr.map { item ->
+                require(item.isJsonPrimitive && item.asJsonPrimitive.isString) {
+                    "input array entries must be strings"
+                }
+                item.asString
+            }
+        }
+        else -> throw IllegalArgumentException(
+            "input must be a string or an array of strings"
+        )
+    }
+}
+
+data class EmbeddingResponse(
+    val `object`: String = "list",
+    val data: List<EmbeddingData>,
+    val model: String,
+    val usage: EmbeddingUsage,
+)
+
+data class EmbeddingData(
+    val `object`: String = "embedding",
+    val embedding: FloatArray,
+    val index: Int,
+)
+
+data class EmbeddingUsage(
+    @SerializedName("prompt_tokens") val promptTokens: Int,
+    @SerializedName("total_tokens") val totalTokens: Int,
+)

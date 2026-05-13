@@ -188,6 +188,26 @@ class LLMServerService : Service() {
     private val gson = Gson()
 
     /**
+     * Embedding service cache. Keyed by model id (the basename without
+     * extension). At most one resident — the model is small (~127 MB for
+     * bge-small) but each ORT session still holds non-trivial RAM, and we
+     * never need two concurrent embedding models.
+     */
+    private val embeddings = object : LruCache<String, com.localllm.app.embedding.EmbeddingService>(1) {
+        override fun entryRemoved(
+            evicted: Boolean,
+            key: String?,
+            oldValue: com.localllm.app.embedding.EmbeddingService?,
+            newValue: com.localllm.app.embedding.EmbeddingService?,
+        ) {
+            if (oldValue != null && oldValue !== newValue) {
+                try { oldValue.close() } catch (_: Exception) {}
+                if (evicted) LogManager.i("LLMServerService", "Evicted embedding model: $key")
+            }
+        }
+    }
+
+    /**
      * Last time we received a request. Used for idle-based engine eviction and
      * optional service auto-stop.
      */
@@ -209,6 +229,37 @@ class LLMServerService : Service() {
     private fun getModelFile(modelId: String): File {
         val filename = if (modelId.endsWith(".litertlm")) modelId else "$modelId.litertlm"
         return File(getExternalFilesDir(null), filename)
+    }
+
+    /**
+     * Look up the vocab file paired with an ONNX embedding model. The
+     * convention is `<modelId>-vocab.txt` next to `<modelId>.onnx` in the
+     * app's external files dir. Returns null if absent — the model is then
+     * considered unavailable (we can't tokenize without it).
+     */
+    private fun resolveVocabFor(modelId: String): File? {
+        val dir = getExternalFilesDir(null) ?: return null
+        val candidates = listOf(
+            File(dir, "$modelId-vocab.txt"),
+            File(dir, "$modelId.vocab.txt"),
+            File(dir, "${modelId}_vocab.txt"),
+        )
+        return candidates.firstOrNull { it.exists() }
+    }
+
+    private fun getOrCreateEmbeddingService(modelId: String): com.localllm.app.embedding.EmbeddingService {
+        embeddings.get(modelId)?.let { return it }
+        val dir = getExternalFilesDir(null) ?: error("external files dir unavailable")
+        val modelFile = File(dir, "$modelId.onnx")
+        if (!modelFile.exists()) error("model file ${modelFile.name} not found")
+        val vocabFile = resolveVocabFor(modelId)
+            ?: error("vocab file for '$modelId' not found (expected $modelId-vocab.txt)")
+        val svc = com.localllm.app.embedding.EmbeddingService(
+            modelPath = modelFile.absolutePath,
+            vocabPath = vocabFile.absolutePath,
+        )
+        embeddings.put(modelId, svc)
+        return svc
     }
 
     override fun onCreate() {
@@ -246,6 +297,15 @@ class LLMServerService : Service() {
                             inferenceMutex.unlock()
                         }
                     }
+                }
+
+                // Embedding services are independent of the LM inferenceMutex,
+                // but they're cheap to recreate (cold ~700 ms on Pixel 6) so
+                // eviction is safe and frees the ORT session memory.
+                if (evictAfter > 0 && idleMs >= evictAfter && embeddings.size() > 0) {
+                    val n = embeddings.size()
+                    embeddings.evictAll()
+                    LogManager.i("LLMServerService", "Idle eviction: released $n embedding model(s) after ${idleMs / 1000}s idle")
                 }
 
                 if (stopAfter > 0 && idleMs >= stopAfter) {
@@ -317,11 +377,13 @@ class LLMServerService : Service() {
                         try {
                             val nEngines = engines.size()
                             val nSessions = sessions.size()
+                            val nEmb = embeddings.size()
                             // Sessions hold conversations tied to engines; clear them
                             // first so the engine eviction callback doesn't double-close.
                             sessions.evictAll()
                             engines.evictAll()
-                            LogManager.i("MemoryPressure", "trim level=$level, action=evicted all ($nEngines engines, $nSessions sessions)")
+                            embeddings.evictAll()
+                            LogManager.i("MemoryPressure", "trim level=$level, action=evicted all ($nEngines engines, $nSessions sessions, $nEmb embedding models)")
                         } finally {
                             inferenceMutex.unlock()
                         }
@@ -416,12 +478,117 @@ class LLMServerService : Service() {
                     get("/v1/models") {
                         if (!authorize(call)) return@get
                         val dir = getExternalFilesDir(null)
-                        val files = dir?.listFiles { file -> file.name.endsWith(".litertlm") } ?: emptyArray()
-                        val models = files.map { file ->
+                        val all = dir?.listFiles() ?: emptyArray()
+                        val llmModels = all.filter { it.name.endsWith(".litertlm") }.map { file ->
                             val modelId = file.name.removeSuffix(".litertlm")
                             ModelData(id = modelId, created = file.lastModified() / 1000)
                         }
-                        call.respond(ModelListResponse(data = models))
+                        // Surface ONNX embedding models too. We only count a model
+                        // as available if its sibling vocab file is present —
+                        // the tokenizer can't be reconstructed from the .onnx alone.
+                        val embModels = all.filter { it.name.endsWith(".onnx") }
+                            .mapNotNull { file ->
+                                val modelId = file.name.removeSuffix(".onnx")
+                                if (resolveVocabFor(modelId) == null) null
+                                else ModelData(id = modelId, created = file.lastModified() / 1000)
+                            }
+                        call.respond(ModelListResponse(data = llmModels + embModels))
+                    }
+
+                    post("/v1/embeddings") {
+                        if (!authorize(call)) return@post
+                        lastActivityAt.set(System.currentTimeMillis())
+
+                        val req = try {
+                            call.receive<EmbeddingRequest>()
+                        } catch (e: Exception) {
+                            call.respond(
+                                HttpStatusCode.BadRequest,
+                                ErrorResponse(ErrorDetails(
+                                    message = "Invalid request body: ${e.message ?: e.javaClass.simpleName}",
+                                    type = "invalid_request_error",
+                                    code = 400
+                                ))
+                            )
+                            return@post
+                        }
+
+                        if (req.encodingFormat != null && req.encodingFormat != "float") {
+                            call.respond(
+                                HttpStatusCode.BadRequest,
+                                ErrorResponse(ErrorDetails(
+                                    message = "encoding_format='${req.encodingFormat}' is not supported (only 'float')",
+                                    type = "invalid_request_error",
+                                    code = 400
+                                ))
+                            )
+                            return@post
+                        }
+
+                        val texts = try { req.inputStrings() } catch (e: IllegalArgumentException) {
+                            call.respond(
+                                HttpStatusCode.BadRequest,
+                                ErrorResponse(ErrorDetails(
+                                    message = e.message ?: "invalid input",
+                                    type = "invalid_request_error",
+                                    code = 400
+                                ))
+                            )
+                            return@post
+                        }
+
+                        // Same prompt-cap budget as chat: protect against
+                        // someone POSTing a massive document.
+                        val maxChars = Settings.maxPromptChars(this@LLMServerService)
+                        val totalChars = texts.sumOf { it.length }
+                        if (totalChars > maxChars) {
+                            call.respond(
+                                HttpStatusCode.PayloadTooLarge,
+                                ErrorResponse(ErrorDetails(
+                                    message = "Total input length $totalChars exceeds cap of $maxChars chars",
+                                    type = "invalid_request_error",
+                                    code = 413
+                                ))
+                            )
+                            return@post
+                        }
+
+                        val svc = try {
+                            getOrCreateEmbeddingService(req.model)
+                        } catch (e: Exception) {
+                            call.respond(
+                                HttpStatusCode.NotFound,
+                                ErrorResponse(ErrorDetails(
+                                    message = "Embedding model '${req.model}' not available: ${e.message ?: e.javaClass.simpleName}",
+                                    type = "invalid_request_error",
+                                    code = 404
+                                ))
+                            )
+                            return@post
+                        }
+
+                        try {
+                            val results = svc.embed(texts)
+                            val data = results.mapIndexed { i, (vec, _) ->
+                                EmbeddingData(embedding = vec, index = i)
+                            }
+                            val tokens = results.sumOf { it.second }
+                            call.respond(EmbeddingResponse(
+                                data = data,
+                                model = req.model,
+                                usage = EmbeddingUsage(promptTokens = tokens, totalTokens = tokens),
+                            ))
+                        } catch (e: Throwable) {
+                            LogManager.e("LLMServerService", "Embedding inference failed: ${e.message}", e)
+                            call.respond(
+                                HttpStatusCode.InternalServerError,
+                                ErrorResponse(ErrorDetails(
+                                    message = "Embedding inference failed: ${e.message ?: e.javaClass.simpleName}",
+                                    type = "api_error",
+                                    code = 500
+                                ))
+                            )
+                        }
                     }
 
                     post("/v1/chat/completions") {
@@ -1402,6 +1569,7 @@ class LLMServerService : Service() {
         // not outlive them.
         sessions.evictAll()
         engines.evictAll()
+        embeddings.evictAll()
         try {
             kotlinx.coroutines.runBlocking { RequestTracker.resetAll() }
         } catch (_: Exception) {}
