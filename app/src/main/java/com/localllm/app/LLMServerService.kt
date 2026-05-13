@@ -1584,19 +1584,31 @@ class LLMServerService : Service() {
         }
 
         LogManager.i("LLMServerService", "Loading engine for $cacheKey")
+        // LiteRT-LM's NPU backend wants the path containing the vendor
+        // delegate .so files (Qualcomm Hexagon, MediaTek APU, Google Edge
+        // TPU). The app's own nativeLibraryDir is the right default —
+        // anyone shipping a custom AAR drops the delegate there.
+        val nativeLibDir = applicationInfo.nativeLibraryDir ?: ""
         val (engine, actualBackend) = try {
             when (backendChoice) {
                 Settings.BACKEND_AUTO -> {
-                    // Prefer GPU; fall back to CPU if init throws (libvndksupport
-                    // missing, OpenCL driver missing, op unsupported, …).
+                    // Try NPU first (best perf when present), then GPU, then CPU.
+                    // Each step swallows init errors and rolls down — by design
+                    // a stock AAR on a stock Pixel ends up on GPU or CPU silently.
                     try {
-                        buildEngine(modelFile, maxTokens, Backend.GPU()) to "GPU"
-                    } catch (e: Exception) {
-                        LogManager.w("LLMServerService", "GPU init failed for $cacheKey, falling back to CPU: ${e.message}")
-                        buildEngine(modelFile, maxTokens, Backend.CPU()) to "CPU"
+                        buildEngine(modelFile, maxTokens, Backend.NPU(nativeLibDir)) to "NPU"
+                    } catch (eNpu: Exception) {
+                        LogManager.i("LLMServerService", "NPU init unavailable for $cacheKey (${eNpu.message}); trying GPU")
+                        try {
+                            buildEngine(modelFile, maxTokens, Backend.GPU()) to "GPU"
+                        } catch (eGpu: Exception) {
+                            LogManager.w("LLMServerService", "GPU init failed for $cacheKey, falling back to CPU: ${eGpu.message}")
+                            buildEngine(modelFile, maxTokens, Backend.CPU()) to "CPU"
+                        }
                     }
                 }
                 Settings.BACKEND_GPU -> buildEngine(modelFile, maxTokens, Backend.GPU()) to "GPU"
+                Settings.BACKEND_NPU -> buildEngine(modelFile, maxTokens, Backend.NPU(nativeLibDir)) to "NPU"
                 else                 -> buildEngine(modelFile, maxTokens, Backend.CPU()) to "CPU"
             }
         } catch (e: Exception) {

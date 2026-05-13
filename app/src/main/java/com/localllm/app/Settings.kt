@@ -39,16 +39,47 @@ object Settings {
     const val KEY_IDLE_EVICT_MS = "idle_evict_ms"
     const val KEY_IDLE_STOP_MS = "idle_stop_ms"
 
-    // Inference backend: "AUTO" tries GPU first and transparently falls back to
-    // CPU when GPU init fails (see LLMServerService.getOrCreateEngine). "CPU" and
-    // "GPU" force a backend strictly with no fallback so init errors surface to
-    // the user. NPU acceleration requires a Qualcomm device plus a
-    // `_qualcomm_*.litertlm` model variant — it is not engaged by AUTO on a
-    // generic Pixel-class device.
+    // Inference backend: "AUTO" tries NPU → GPU → CPU and transparently falls
+    // back when each fails (see LLMServerService.getOrCreateEngine). "CPU",
+    // "GPU", "NPU" force a backend strictly with no fallback so init errors
+    // surface to the user.
+    //
+    // LiteRT-LM uses "NPU" as the umbrella for all neural accelerators —
+    // Qualcomm Hexagon, MediaTek APU, and Google's Edge TPU on Tensor — so
+    // there is no separate "TPU" option. NPU init only succeeds when the
+    // vendor delegate .so is present in the app's nativeLibraryDir; the
+    // stock LiteRT-LM 0.11.0 AAR ships only CPU + GPU (OpenCL) delegates,
+    // so on a plain Pixel-class device NPU will fail at init and (under
+    // AUTO) fall through to GPU. We still expose the pill because vendor
+    // delegate drops + custom AAR variants are a real distribution model.
     const val KEY_BACKEND = "backend"
     const val BACKEND_AUTO = "AUTO"
     const val BACKEND_CPU = "CPU"
     const val BACKEND_GPU = "GPU"
+    const val BACKEND_NPU = "NPU"
+
+    /**
+     * Heuristic: returns true if a vendor NPU/TPU delegate .so appears to be
+     * available in the app's nativeLibraryDir. Used by the Settings UI to
+     * disable the NPU pill on devices where it would just fail at init.
+     *
+     * Conservative on purpose — we match a handful of well-known names
+     * (Qualcomm Hexagon, MediaTek APU, LiteRT-LM's own NPU shim). Anyone
+     * shipping a custom delegate under a different name can still pick NPU
+     * manually and surface the actual error in /health.
+     */
+    fun hasNpuDelegate(context: Context): Boolean {
+        val dir = context.applicationInfo.nativeLibraryDir ?: return false
+        val files = java.io.File(dir).listFiles() ?: return false
+        return files.any { f ->
+            val n = f.name.lowercase()
+            n.contains("npu") ||
+            n.contains("hexagon") ||
+            n.startsWith("libqnn") ||
+            n.contains("neuron") ||
+            n.startsWith("libapu")
+        }
+    }
 
     // CORS: when off (default) the server responds without CORS headers — safe
     // because only non-browser clients (native apps, curl) can use it. When on,

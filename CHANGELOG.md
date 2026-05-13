@@ -8,6 +8,27 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+#### NPU/TPU backend pill in Settings
+
+- **`Backend.NPU(nativeLibraryDir)`** wired into both the explicit backend
+  selector and the AUTO fallback chain (NPU → GPU → CPU). LiteRT-LM treats
+  Qualcomm Hexagon, MediaTek APU, and Google's Edge TPU on Tensor as one
+  accelerator family ("NPU"), so this is the right surface — there's no
+  separate `Backend.TPU`.
+- **Auto-detection** (`Settings.hasNpuDelegate`) probes
+  `applicationInfo.nativeLibraryDir` for known vendor delegate `.so` names
+  (`libqnn*.so`, `*hexagon*`, `*neuron*`, `libapu*`). The NPU/TPU pill in
+  Settings is enabled only when a delegate is detected; otherwise it shows
+  disabled, and the legend row is hidden to avoid clutter.
+- The legend documents what's actually required to use NPU per vendor
+  (QAIRT SDK + `ADSP_LIBRARY_PATH` + SoC-specific `.litertlm` for Qualcomm;
+  Tensor ML SDK signup gating on Pixel) and links to the official
+  LiteRT-LM NPU page.
+
+On a stock Pixel 6 build (no vendor delegates present) the pill stays
+disabled — which matches reality: Google Tensor NPU is experimental-access
+only, not yet a public Maven artifact.
+
 #### RAG: on-device document store + semantic search
 
 - **ObjectBox 4.0.3 vector store**, persisted under the app's private data

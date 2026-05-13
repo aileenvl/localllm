@@ -136,9 +136,11 @@
     <string name="settings_backend_auto">Auto</string>
     <string name="settings_backend_cpu">CPU</string>
     <string name="settings_backend_gpu">GPU</string>
-    <string name="settings_backend_desc_auto"><![CDATA[<b>Auto</b> <i>(recommended)</i> — tries GPU first, falls back to CPU if the device\'s GPU delegate can\'t initialize. On most Pixel devices the GPU delegate fails (missing system library) and AUTO transparently uses CPU. Check <tt>GET /health</tt> to see the chosen backend per cached engine.]]></string>
+    <string name="settings_backend_npu">NPU/TPU</string>
+    <string name="settings_backend_desc_auto"><![CDATA[<b>Auto</b> <i>(recommended)</i> — tries NPU → GPU → CPU and falls back when each delegate can\'t initialize. On a stock Pixel image NPU is usually absent and GPU often fails too, so AUTO commonly ends up on CPU. Check <tt>GET /health</tt> to see what was actually chosen.]]></string>
     <string name="settings_backend_desc_cpu"><![CDATA[<b>CPU</b> — force <tt>Backend.CPU</tt>. Always works. ~6–12 tok/s on Pixel-class hardware for Gemma 4 E2B.]]></string>
     <string name="settings_backend_desc_gpu"><![CDATA[<b>GPU</b> — force <tt>Backend.GPU</tt>. Strict — no fallback. Will fail at request time on devices missing <tt>libvndksupport.so</tt> (most stock Pixel images).]]></string>
+    <string name="settings_backend_desc_npu"><![CDATA[<b>NPU/TPU</b> — force <tt>Backend.NPU</tt>. LiteRT-LM treats all neural accelerators as one family but each path needs work (see <tt>ai.google.dev/edge/litert/next/litert_lm_npu</tt>): <b>Qualcomm Hexagon</b> needs the QAIRT SDK (<tt>libQnnHtp.so</tt> family) dropped in <tt>nativeLibraryDir</tt>, the <tt>ADSP_LIBRARY_PATH</tt> env var set, AND a SoC-specific NPU-compiled model (e.g. <tt>Gemma3-1B-IT_q4_..._sm8750.litertlm</tt>) — a stock CPU/GPU <tt>.litertlm</tt> won\'t work. <b>MediaTek APU</b> is similar with a <tt>_mt6989</tt> variant. <b>Google Tensor</b> (Pixel) is experimental-access only — signup gated. This pill auto-enables when a delegate <tt>.so</tt> is detected.]]></string>
     <string name="settings_chipset_tensor">Your device: %1$s (Tensor). GPU delegate often fails; AUTO will fall back to CPU.</string>
     <string name="settings_chipset_snapdragon">Your device: %1$s (Snapdragon). NPU variant <tt>.litertlm</tt> files in the catalog should work — try them with backend AUTO.</string>
     <string name="settings_chipset_other">Your device: %1$s. AUTO is the safe choice.</string>

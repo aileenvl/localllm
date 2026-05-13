@@ -60,6 +60,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -562,19 +563,25 @@ private fun NumberField(
 
 @Composable
 private fun BackendSelector(selected: String, onSelect: (String) -> Unit) {
+    val context = LocalContext.current
+    // Probed once per recomposition — cheap (listFiles on a small dir).
+    val npuAvailable = remember { Settings.hasNpuDelegate(context) }
+    data class Option(val value: String, val label: String, val enabled: Boolean)
     val options = listOf(
-        Settings.BACKEND_AUTO to stringResource(R.string.settings_backend_auto),
-        Settings.BACKEND_CPU to stringResource(R.string.settings_backend_cpu),
-        Settings.BACKEND_GPU to stringResource(R.string.settings_backend_gpu)
+        Option(Settings.BACKEND_AUTO, stringResource(R.string.settings_backend_auto), true),
+        Option(Settings.BACKEND_CPU, stringResource(R.string.settings_backend_cpu), true),
+        Option(Settings.BACKEND_GPU, stringResource(R.string.settings_backend_gpu), true),
+        Option(Settings.BACKEND_NPU, stringResource(R.string.settings_backend_npu), npuAvailable),
     )
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        options.forEach { (value, label) ->
-            val isSel = selected == value
+        options.forEach { opt ->
+            val isSel = selected == opt.value
             Button(
-                onClick = { onSelect(value) },
+                onClick = { onSelect(opt.value) },
+                enabled = opt.enabled,
                 modifier = Modifier.weight(1f),
                 colors = if (isSel) ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.primary,
@@ -583,13 +590,15 @@ private fun BackendSelector(selected: String, onSelect: (String) -> Unit) {
                     containerColor = MaterialTheme.colorScheme.surfaceVariant,
                     contentColor = MaterialTheme.colorScheme.onSurface
                 )
-            ) { Text(label) }
+            ) { Text(opt.label) }
         }
     }
 }
 
 @Composable
 private fun BackendLegend(selected: String) {
+    val context = LocalContext.current
+    val npuAvailable = remember { Settings.hasNpuDelegate(context) }
     Column(
         verticalArrangement = Arrangement.spacedBy(6.dp),
         modifier = Modifier.fillMaxWidth(),
@@ -606,6 +615,14 @@ private fun BackendLegend(selected: String) {
             text = htmlToAnnotated(stringResource(R.string.settings_backend_desc_gpu)),
             highlighted = selected == Settings.BACKEND_GPU,
         )
+        // Only surface the NPU/TPU description when the delegate is actually
+        // present — on a stock install the row would just confuse the user.
+        if (npuAvailable) {
+            LegendLine(
+                text = htmlToAnnotated(stringResource(R.string.settings_backend_desc_npu)),
+                highlighted = selected == Settings.BACKEND_NPU,
+            )
+        }
     }
 }
 
