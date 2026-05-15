@@ -8,31 +8,50 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-#### Engine init on Google Tensor SoCs (Pixel 6 / Pixel 10)
+#### Engine init on Google Tensor SoCs (Pixel 6 / Pixel 10) — with visible feedback
 
-- **GPU init no longer SIGSEGVs the process on Tensor G5.** LiteRT-LM 0.11.0's
-  `nativeCreateEngine` can null-deref inside `liblitertlm_jni.so` when called
-  with `Backend.GPU()` on a Tensor SoC. The crash is non-deterministic — it
-  sometimes throws a catchable exception, sometimes kills the process before
-  our outer try/catch can run. Explicit `BACKEND_GPU` on Tensor now bounces
-  to the safer fallback chain instead of risking the crash; users who really
-  want to test GPU can do so on non-Tensor devices.
 - **Direct `Backend.CPU()` init no longer fails on Tensor.** A cold CPU init
   on Tensor throws inside `llm_litert_compiled_model_executor.cc:2023` unless
   the JNI library has first attempted another backend in the same process.
-  The fix runs a no-op `Backend.NPU(...)` "primer" call before the real CPU
+  The fix runs a no-op `Backend.NPU(...)` primer call before the real CPU
   init — the primer is expected to fail (no vendor delegate on stock
-  hardware) but the JNI side-effects leave the lib in a state where the
-  subsequent `Backend.CPU()` succeeds. Verified end-to-end on Pixel 10
-  (Tensor G5, Android 16): all three settings (AUTO/CPU/GPU) now return a
-  working engine and chat completions stream without crashing.
+  hardware) but the side effects unblock CPU. The primer attempt appears
+  in `/health`'s new `attempts` field as `NPU-primer=expected-fail`, not
+  hidden.
+- **`Backend.GPU()` on Tensor no longer SIGSEGVs the service** thanks to
+  the same NPU primer. GPU init now throws a catchable exception
+  (typically `TF_LITE_AUX not found in the model` on Tensor G5 with the
+  stock Gemma 4 `.litertlm`) which propagates to the caller as a proper
+  HTTP 500. The pill stays selectable but failures are now visible and
+  recoverable — not a process kill.
+- **No silent fallback for explicit choices.** If you pick GPU and GPU
+  fails, you get an error. Same for NPU. AUTO is the only mode that rolls
+  down the chain, and every step in that chain — including skips — is
+  recorded.
 
-#### `autoEngineChain` extracted
+### Added
 
-The AUTO fallback (NPU → GPU → CPU) is now a single helper used by both
-AUTO mode and the Tensor-safety route for explicit GPU. On Tensor the
-chain skips GPU entirely (skip-not-try, because a native crash there
-can't be caught).
+#### `/health` exposes the engine-init attempt chain
+
+Each cached engine now reports the full sequence of backends tried, what
+each one returned, and how long it took:
+
+```json
+"engines": [{
+  "key": "gemma-4-e2b_16_AUTO",
+  "backend": "CPU",
+  "attempts": [
+    {"backend": "NPU", "result": "failed: TF_LITE_AUX not found in the model", "duration_ms": 5394},
+    {"backend": "GPU", "result": "skipped: known SIGSEGV on Tensor", "duration_ms": 0},
+    {"backend": "CPU", "result": "ok", "duration_ms": 3168}
+  ]
+}]
+```
+
+The same chain is logged via `LogManager` (visible in the Console tab)
+under `LLMServerService: Engine <key> resolved to <backend>. Chain: ...`.
+Error responses for explicit choices also include the attempts summary
+inline in the error message.
 
 ### Added
 

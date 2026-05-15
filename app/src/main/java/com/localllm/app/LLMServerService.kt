@@ -100,11 +100,28 @@ class LLMServerService : Service() {
      * also evicted first — conversations can't outlive their parent engine.
      */
     /**
-     * Wraps the engine alongside the backend label that actually succeeded at
-     * `initialize()` time. When AUTO falls back from GPU to CPU we want
-     * `/health` to surface what each engine *really* ended up on.
+     * Wraps the engine alongside the resolved backend label and the
+     * full chain of attempts that produced it. Surfacing the attempts
+     * in `/health` keeps the user honest about what actually happened
+     * — silent fallback hides too much, especially on Tensor SoCs
+     * where some backends only work after a JNI primer step.
      */
-    private data class CachedEngine(val engine: Engine, val backend: String)
+    private data class CachedEngine(
+        val engine: Engine,
+        val backend: String,
+        val attempts: List<BackendAttempt>,
+    )
+
+    /**
+     * One step in the engine-init chain. Surfaced via `/health` so the
+     * user can see exactly which backends were tried, what failed and
+     * why, and which one ultimately produced the cached engine.
+     */
+    private data class BackendAttempt(
+        val backend: String,
+        val result: String,
+        val durationMs: Long,
+    )
 
     private val engines = object : LruCache<String, CachedEngine>(2) {
         override fun entryRemoved(evicted: Boolean, key: String?, oldValue: CachedEngine?, newValue: CachedEngine?) {
@@ -485,7 +502,17 @@ class LLMServerService : Service() {
                             "queue_depth" to RequestTracker.queue.value.size,
                             "engines_loaded" to engines.size(),
                             "engines" to engines.snapshot().map { (key, v) ->
-                                mapOf("key" to key, "backend" to v.backend)
+                                mapOf(
+                                    "key" to key,
+                                    "backend" to v.backend,
+                                    "attempts" to v.attempts.map {
+                                        mapOf(
+                                            "backend" to it.backend,
+                                            "result" to it.result,
+                                            "duration_ms" to it.durationMs,
+                                        )
+                                    },
+                                )
                             }
                         ))
                     }
@@ -1559,33 +1586,65 @@ class LLMServerService : Service() {
     }
 
     /**
-     * On Google Tensor, calling [Backend.CPU] without first touching another
-     * backend reproducibly fails inside
-     * `llm_litert_compiled_model_executor.cc:2023`. Attempting [Backend.NPU]
-     * first throws (no vendor delegate present) but leaves the JNI lib in a
-     * state where the subsequent CPU init succeeds. We never use the
-     * resulting engine — just the side effects.
-     *
-     * Uses the real model file so the file-IO portion of init runs (some
-     * of which appears to be what the JNI lib needs warmed up). If NPU
-     * does somehow succeed (a future AAR with a Tensor delegate dropped
-     * in), we close the engine and let the caller build a fresh CPU one;
-     * the cache key bookkeeping stays honest that way.
+     * Time one backend attempt and append the outcome (ok / failed: ...) to
+     * [attempts]. Re-throws on failure — callers in AUTO mode catch + roll
+     * down the chain; callers in explicit mode let it propagate.
      */
-    private fun primeTensorJniState(modelFile: File, nativeLibDir: String) {
-        try {
-            val warmupEngine = buildEngine(modelFile, /*maxTokens=*/null, Backend.NPU(nativeLibDir))
-            try { warmupEngine.close() } catch (_: Throwable) {}
-        } catch (_: Throwable) {
-            // Expected — there's no NPU delegate on stock Tensor devices.
-            // The throw is the JNI-state side effect we wanted.
+    private inline fun <T> runAttempt(
+        attempts: MutableList<BackendAttempt>,
+        label: String,
+        block: () -> T,
+    ): T {
+        val t0 = System.nanoTime()
+        return try {
+            val out = block()
+            attempts += BackendAttempt(label, "ok", (System.nanoTime() - t0) / 1_000_000)
+            out
+        } catch (e: Throwable) {
+            attempts += BackendAttempt(label, "failed: ${e.message ?: e.javaClass.simpleName}", (System.nanoTime() - t0) / 1_000_000)
+            throw e
         }
     }
 
     /**
-     * Shared "try the best backend that works" chain. Used by AUTO directly
-     * and as a safety route for explicit GPU on Tensor SoCs (where the
-     * direct GPU init can SIGSEGV).
+     * On Google Tensor, calling [Backend.CPU] or [Backend.GPU] without
+     * first touching another backend reproducibly fails inside
+     * `llm_litert_compiled_model_executor.cc:2023` (CPU) or SIGSEGVs in
+     * `nativeCreateEngine` (GPU). Attempting [Backend.NPU] first throws
+     * (no vendor delegate present) but leaves the JNI lib in a state
+     * where the subsequent real init succeeds. We discard the warmup
+     * engine — only the JNI side effects are wanted.
+     *
+     * The primer attempt is recorded as `NPU-primer` in the chain so the
+     * user can see exactly what happened in `/health`.
+     */
+    private fun primeTensorJniState(
+        modelFile: File,
+        nativeLibDir: String,
+        attempts: MutableList<BackendAttempt>,
+    ) {
+        val t0 = System.nanoTime()
+        try {
+            val warmupEngine = buildEngine(modelFile, /*maxTokens=*/null, Backend.NPU(nativeLibDir))
+            try { warmupEngine.close() } catch (_: Throwable) {}
+            attempts += BackendAttempt("NPU-primer", "ok (unexpected: closing)", (System.nanoTime() - t0) / 1_000_000)
+        } catch (e: Throwable) {
+            // Expected — no NPU delegate on stock Tensor. Record the
+            // outcome so it's visible in /health, but don't re-throw.
+            attempts += BackendAttempt("NPU-primer", "expected-fail: ${e.message ?: e.javaClass.simpleName}", (System.nanoTime() - t0) / 1_000_000)
+        }
+    }
+
+    /**
+     * Shared "try each backend, roll down on failure" chain used by AUTO.
+     * Every attempt — including skips — is appended to [attempts] so
+     * `/health` can show the exact decision tree.
+     *
+     * On Tensor SoCs we skip GPU explicitly rather than try-it-and-hope:
+     * a GPU init crash is a native SIGSEGV that kills the process, which
+     * is exactly what AUTO is supposed to prevent. Users who want to
+     * test GPU on a Tensor device can pick GPU explicitly (which is the
+     * informed-consent path).
      */
     private fun autoEngineChain(
         modelFile: File,
@@ -1593,23 +1652,30 @@ class LLMServerService : Service() {
         nativeLibDir: String,
         tensor: Boolean,
         cacheKey: String,
+        attempts: MutableList<BackendAttempt>,
     ): Pair<Engine, String> {
         try {
-            return buildEngine(modelFile, maxTokens, Backend.NPU(nativeLibDir)) to "NPU"
-        } catch (eNpu: Exception) {
-            LogManager.i("LLMServerService", "NPU init unavailable for $cacheKey (${eNpu.message}); trying GPU")
-        }
-        if (!tensor) {
-            try {
-                return buildEngine(modelFile, maxTokens, Backend.GPU()) to "GPU"
-            } catch (eGpu: Exception) {
-                LogManager.w("LLMServerService", "GPU init failed for $cacheKey, falling back to CPU: ${eGpu.message}")
+            return runAttempt(attempts, "NPU") {
+                buildEngine(modelFile, maxTokens, Backend.NPU(nativeLibDir)) to "NPU"
             }
-        } else {
-            // Skip GPU on Tensor — see BACKEND_GPU comment in [getOrCreateEngine].
-            LogManager.i("LLMServerService", "Skipping GPU step on Tensor SoC; going straight to CPU")
+        } catch (_: Throwable) {
+            LogManager.i("LLMServerService", "NPU init unavailable for $cacheKey; continuing chain")
         }
-        return buildEngine(modelFile, maxTokens, Backend.CPU()) to "CPU"
+        if (tensor) {
+            attempts += BackendAttempt("GPU", "skipped: known SIGSEGV on Tensor", 0L)
+            LogManager.i("LLMServerService", "Skipping GPU on Tensor SoC (AUTO chain); going to CPU")
+        } else {
+            try {
+                return runAttempt(attempts, "GPU") {
+                    buildEngine(modelFile, maxTokens, Backend.GPU()) to "GPU"
+                }
+            } catch (_: Throwable) {
+                LogManager.w("LLMServerService", "GPU init failed for $cacheKey; falling back to CPU")
+            }
+        }
+        return runAttempt(attempts, "CPU") {
+            buildEngine(modelFile, maxTokens, Backend.CPU()) to "CPU"
+        }
     }
 
     private fun buildEngine(modelFile: File, maxTokens: Int?, backend: Backend): Engine {
@@ -1660,21 +1726,25 @@ class LLMServerService : Service() {
         // anyone shipping a custom AAR drops the delegate there.
         val nativeLibDir = applicationInfo.nativeLibraryDir ?: ""
         val tensor = isTensorSoc()
+        val attempts = mutableListOf<BackendAttempt>()
         val (engine, actualBackend) = try {
             when (backendChoice) {
-                Settings.BACKEND_AUTO -> autoEngineChain(modelFile, maxTokens, nativeLibDir, tensor, cacheKey)
+                Settings.BACKEND_AUTO -> autoEngineChain(modelFile, maxTokens, nativeLibDir, tensor, cacheKey, attempts)
                 Settings.BACKEND_GPU -> {
-                    // LiteRT-LM 0.11.0 GPU init can SIGSEGV inside the JNI lib on
-                    // Google Tensor SoCs (observed on Tensor G1 and G5). A native
-                    // crash kills the whole process before our outer try/catch
-                    // can fall back, so we refuse the explicit GPU choice on
-                    // Tensor and route through the safer AUTO chain instead.
-                    if (tensor) {
-                        LogManager.w("LLMServerService", "Declining explicit GPU on Tensor SoC (LiteRT-LM 0.11.0 crashes); using AUTO chain")
-                        autoEngineChain(modelFile, maxTokens, nativeLibDir, tensor, cacheKey)
-                    } else buildEngine(modelFile, maxTokens, Backend.GPU()) to "GPU"
+                    // Explicit GPU: no silent rerouting. On Tensor we still run
+                    // the JNI primer first (the same workaround the CPU path
+                    // uses — sometimes it's enough to unstick GPU too). If GPU
+                    // init throws, the error propagates to the user; if it
+                    // SIGSEGVs, the process dies and START_STICKY brings us
+                    // back. Either way the user sees what happened.
+                    if (tensor) primeTensorJniState(modelFile, nativeLibDir, attempts)
+                    runAttempt(attempts, "GPU") {
+                        buildEngine(modelFile, maxTokens, Backend.GPU()) to "GPU"
+                    }
                 }
-                Settings.BACKEND_NPU -> buildEngine(modelFile, maxTokens, Backend.NPU(nativeLibDir)) to "NPU"
+                Settings.BACKEND_NPU -> runAttempt(attempts, "NPU") {
+                    buildEngine(modelFile, maxTokens, Backend.NPU(nativeLibDir)) to "NPU"
+                }
                 else /* BACKEND_CPU */ -> {
                     // On Tensor SoCs, a direct Backend.CPU() init throws
                     // inside `llm_litert_compiled_model_executor.cc:2023`
@@ -1683,18 +1753,19 @@ class LLMServerService : Service() {
                     // cheapest such warmup — without a vendor delegate it fails
                     // fast at init but leaves the JNI lib in a state where the
                     // subsequent CPU init succeeds. Reproducible on Pixel 10.
-                    if (tensor) {
-                        primeTensorJniState(modelFile, nativeLibDir)
+                    if (tensor) primeTensorJniState(modelFile, nativeLibDir, attempts)
+                    runAttempt(attempts, "CPU") {
+                        buildEngine(modelFile, maxTokens, Backend.CPU()) to "CPU"
                     }
-                    buildEngine(modelFile, maxTokens, Backend.CPU()) to "CPU"
                 }
             }
         } catch (e: Exception) {
-            throw IllegalStateException("Failed to initialize engine: ${e.message ?: e.javaClass.simpleName}", e)
+            throw IllegalStateException("Failed to initialize engine: ${e.message ?: e.javaClass.simpleName} (attempts: ${attempts.joinToString { "${it.backend}=${it.result}" }})", e)
         }
 
         try {
-            engines.put(cacheKey, CachedEngine(engine, actualBackend))
+            engines.put(cacheKey, CachedEngine(engine, actualBackend, attempts.toList()))
+            LogManager.i("LLMServerService", "Engine $cacheKey resolved to $actualBackend. Chain: ${attempts.joinToString { "${it.backend}(${it.result}, ${it.durationMs}ms)" }}")
         } catch (e: Exception) {
             try { engine.close() } catch (_: Exception) {}
             throw e
