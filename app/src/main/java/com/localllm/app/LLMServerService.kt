@@ -1542,6 +1542,76 @@ class LLMServerService : Service() {
      * as a small seam so the AUTO fallback path can call this twice without
      * duplicating the EngineConfig wiring.
      */
+    /**
+     * Returns true when running on a Google Tensor SoC (Pixel 6 and later).
+     * LiteRT-LM 0.11.0 has known stability issues on this family that
+     * require backend-specific workarounds — see [primeTensorJniState] and
+     * the BACKEND_GPU branch of [getOrCreateEngine].
+     *
+     * `Build.SOC_MODEL` is API 31+. On older devices we return false; the
+     * Tensor family launched on Android 12, so this is correct by
+     * construction.
+     */
+    private fun isTensorSoc(): Boolean {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S) return false
+        val soc = android.os.Build.SOC_MODEL?.lowercase() ?: return false
+        return soc.contains("tensor")
+    }
+
+    /**
+     * On Google Tensor, calling [Backend.CPU] without first touching another
+     * backend reproducibly fails inside
+     * `llm_litert_compiled_model_executor.cc:2023`. Attempting [Backend.NPU]
+     * first throws (no vendor delegate present) but leaves the JNI lib in a
+     * state where the subsequent CPU init succeeds. We never use the
+     * resulting engine — just the side effects.
+     *
+     * Uses the real model file so the file-IO portion of init runs (some
+     * of which appears to be what the JNI lib needs warmed up). If NPU
+     * does somehow succeed (a future AAR with a Tensor delegate dropped
+     * in), we close the engine and let the caller build a fresh CPU one;
+     * the cache key bookkeeping stays honest that way.
+     */
+    private fun primeTensorJniState(modelFile: File, nativeLibDir: String) {
+        try {
+            val warmupEngine = buildEngine(modelFile, /*maxTokens=*/null, Backend.NPU(nativeLibDir))
+            try { warmupEngine.close() } catch (_: Throwable) {}
+        } catch (_: Throwable) {
+            // Expected — there's no NPU delegate on stock Tensor devices.
+            // The throw is the JNI-state side effect we wanted.
+        }
+    }
+
+    /**
+     * Shared "try the best backend that works" chain. Used by AUTO directly
+     * and as a safety route for explicit GPU on Tensor SoCs (where the
+     * direct GPU init can SIGSEGV).
+     */
+    private fun autoEngineChain(
+        modelFile: File,
+        maxTokens: Int?,
+        nativeLibDir: String,
+        tensor: Boolean,
+        cacheKey: String,
+    ): Pair<Engine, String> {
+        try {
+            return buildEngine(modelFile, maxTokens, Backend.NPU(nativeLibDir)) to "NPU"
+        } catch (eNpu: Exception) {
+            LogManager.i("LLMServerService", "NPU init unavailable for $cacheKey (${eNpu.message}); trying GPU")
+        }
+        if (!tensor) {
+            try {
+                return buildEngine(modelFile, maxTokens, Backend.GPU()) to "GPU"
+            } catch (eGpu: Exception) {
+                LogManager.w("LLMServerService", "GPU init failed for $cacheKey, falling back to CPU: ${eGpu.message}")
+            }
+        } else {
+            // Skip GPU on Tensor — see BACKEND_GPU comment in [getOrCreateEngine].
+            LogManager.i("LLMServerService", "Skipping GPU step on Tensor SoC; going straight to CPU")
+        }
+        return buildEngine(modelFile, maxTokens, Backend.CPU()) to "CPU"
+    }
+
     private fun buildEngine(modelFile: File, maxTokens: Int?, backend: Backend): Engine {
         // Always enable a CPU vision backend so multimodal image inputs can be
         // served on the first request without a per-request engine rebuild.
@@ -1589,27 +1659,35 @@ class LLMServerService : Service() {
         // TPU). The app's own nativeLibraryDir is the right default —
         // anyone shipping a custom AAR drops the delegate there.
         val nativeLibDir = applicationInfo.nativeLibraryDir ?: ""
+        val tensor = isTensorSoc()
         val (engine, actualBackend) = try {
             when (backendChoice) {
-                Settings.BACKEND_AUTO -> {
-                    // Try NPU first (best perf when present), then GPU, then CPU.
-                    // Each step swallows init errors and rolls down — by design
-                    // a stock AAR on a stock Pixel ends up on GPU or CPU silently.
-                    try {
-                        buildEngine(modelFile, maxTokens, Backend.NPU(nativeLibDir)) to "NPU"
-                    } catch (eNpu: Exception) {
-                        LogManager.i("LLMServerService", "NPU init unavailable for $cacheKey (${eNpu.message}); trying GPU")
-                        try {
-                            buildEngine(modelFile, maxTokens, Backend.GPU()) to "GPU"
-                        } catch (eGpu: Exception) {
-                            LogManager.w("LLMServerService", "GPU init failed for $cacheKey, falling back to CPU: ${eGpu.message}")
-                            buildEngine(modelFile, maxTokens, Backend.CPU()) to "CPU"
-                        }
-                    }
+                Settings.BACKEND_AUTO -> autoEngineChain(modelFile, maxTokens, nativeLibDir, tensor, cacheKey)
+                Settings.BACKEND_GPU -> {
+                    // LiteRT-LM 0.11.0 GPU init can SIGSEGV inside the JNI lib on
+                    // Google Tensor SoCs (observed on Tensor G1 and G5). A native
+                    // crash kills the whole process before our outer try/catch
+                    // can fall back, so we refuse the explicit GPU choice on
+                    // Tensor and route through the safer AUTO chain instead.
+                    if (tensor) {
+                        LogManager.w("LLMServerService", "Declining explicit GPU on Tensor SoC (LiteRT-LM 0.11.0 crashes); using AUTO chain")
+                        autoEngineChain(modelFile, maxTokens, nativeLibDir, tensor, cacheKey)
+                    } else buildEngine(modelFile, maxTokens, Backend.GPU()) to "GPU"
                 }
-                Settings.BACKEND_GPU -> buildEngine(modelFile, maxTokens, Backend.GPU()) to "GPU"
                 Settings.BACKEND_NPU -> buildEngine(modelFile, maxTokens, Backend.NPU(nativeLibDir)) to "NPU"
-                else                 -> buildEngine(modelFile, maxTokens, Backend.CPU()) to "CPU"
+                else /* BACKEND_CPU */ -> {
+                    // On Tensor SoCs, a direct Backend.CPU() init throws
+                    // inside `llm_litert_compiled_model_executor.cc:2023`
+                    // unless the JNI library has first attempted (and gracefully
+                    // failed) some other backend. The NPU attempt below is the
+                    // cheapest such warmup — without a vendor delegate it fails
+                    // fast at init but leaves the JNI lib in a state where the
+                    // subsequent CPU init succeeds. Reproducible on Pixel 10.
+                    if (tensor) {
+                        primeTensorJniState(modelFile, nativeLibDir)
+                    }
+                    buildEngine(modelFile, maxTokens, Backend.CPU()) to "CPU"
+                }
             }
         } catch (e: Exception) {
             throw IllegalStateException("Failed to initialize engine: ${e.message ?: e.javaClass.simpleName}", e)

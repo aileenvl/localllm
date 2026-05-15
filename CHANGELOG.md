@@ -6,6 +6,34 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+#### Engine init on Google Tensor SoCs (Pixel 6 / Pixel 10)
+
+- **GPU init no longer SIGSEGVs the process on Tensor G5.** LiteRT-LM 0.11.0's
+  `nativeCreateEngine` can null-deref inside `liblitertlm_jni.so` when called
+  with `Backend.GPU()` on a Tensor SoC. The crash is non-deterministic — it
+  sometimes throws a catchable exception, sometimes kills the process before
+  our outer try/catch can run. Explicit `BACKEND_GPU` on Tensor now bounces
+  to the safer fallback chain instead of risking the crash; users who really
+  want to test GPU can do so on non-Tensor devices.
+- **Direct `Backend.CPU()` init no longer fails on Tensor.** A cold CPU init
+  on Tensor throws inside `llm_litert_compiled_model_executor.cc:2023` unless
+  the JNI library has first attempted another backend in the same process.
+  The fix runs a no-op `Backend.NPU(...)` "primer" call before the real CPU
+  init — the primer is expected to fail (no vendor delegate on stock
+  hardware) but the JNI side-effects leave the lib in a state where the
+  subsequent `Backend.CPU()` succeeds. Verified end-to-end on Pixel 10
+  (Tensor G5, Android 16): all three settings (AUTO/CPU/GPU) now return a
+  working engine and chat completions stream without crashing.
+
+#### `autoEngineChain` extracted
+
+The AUTO fallback (NPU → GPU → CPU) is now a single helper used by both
+AUTO mode and the Tensor-safety route for explicit GPU. On Tensor the
+chain skips GPU entirely (skip-not-try, because a native crash there
+can't be caught).
+
 ### Added
 
 #### SoC-specific NPU model variants in the Catalog
