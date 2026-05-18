@@ -34,6 +34,9 @@ object Settings {
     const val KEY_MAX_PROMPT_CHARS = "max_prompt_chars"
     const val KEY_API_KEY = "api_key"
     const val KEY_KEEP_AWAKE = "keep_awake"
+    // Per-client rate limit (token bucket keyed by User-Agent). 0 disables.
+    const val KEY_RATE_LIMIT_PER_SEC = "rate_limit_per_sec"
+    const val KEY_RATE_LIMIT_BURST = "rate_limit_burst"
 
     // Background efficiency
     const val KEY_IDLE_EVICT_MS = "idle_evict_ms"
@@ -93,6 +96,10 @@ object Settings {
     const val DEFAULT_REQUEST_TIMEOUT_MS = 120_000L
     const val DEFAULT_MAX_QUEUE_DEPTH = 8
     const val DEFAULT_MAX_PROMPT_CHARS = 100_000
+    /** Per-client requests per second (0 disables the limiter entirely). */
+    const val DEFAULT_RATE_LIMIT_PER_SEC = 0.0
+    /** Burst capacity per client when the limiter is enabled. */
+    const val DEFAULT_RATE_LIMIT_BURST = 10.0
     const val DEFAULT_IDLE_EVICT_MS = 5L * 60_000L   // 5 minutes; 0 disables
     const val DEFAULT_IDLE_STOP_MS = 0L               // disabled by default
 
@@ -156,6 +163,14 @@ object Settings {
 
     fun apiKey(context: Context): String = repo(context).apiKey.value
     fun setApiKey(context: Context, value: String) = repo(context).setApiKey(value)
+
+    fun rateLimitPerSec(context: Context): Double = repo(context).rateLimitPerSec.value
+    fun setRateLimitPerSec(context: Context, value: Double) =
+        repo(context).setRateLimitPerSec(value)
+
+    fun rateLimitBurst(context: Context): Double = repo(context).rateLimitBurst.value
+    fun setRateLimitBurst(context: Context, value: Double) =
+        repo(context).setRateLimitBurst(value)
 
     fun keepAwake(context: Context): Boolean = repo(context).keepAwake.value
     fun setKeepAwake(context: Context, value: Boolean) = repo(context).setKeepAwake(value)

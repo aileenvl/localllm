@@ -63,6 +63,10 @@
     <string name="dash_live">Live</string>
     <string name="dash_idle">Idle. No request running.</string>
     <string name="dash_waiting">Waiting (%1$d)</string>
+    <string name="dash_clients">Clients</string>
+    <string name="dash_client_stats">%1$d done · %2$d failed · %3$d chunks · avg %4$dms</string>
+    <string name="dash_client_inflight">running · %1$d queued</string>
+    <string name="dash_client_queued">%1$d queued</string>
     <string name="dash_queue_label">queue: %1$d</string>
     <string name="dash_stats">Stats</string>
     <string name="dash_reset">Reset</string>

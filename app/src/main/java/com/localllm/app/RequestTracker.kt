@@ -39,7 +39,16 @@ object RequestTracker {
         val completedAt: Long? = null,
         val chunkCount: Int = 0,
         val outputChars: Int = 0,
-        val error: String? = null
+        val error: String? = null,
+        /**
+         * Client identity for fairness, rate limiting, and per-app metrics.
+         * Derived from the request's `User-Agent` header at enqueue time;
+         * unknown / no-UA requests fall back to `"anonymous"`. Multiple
+         * sibling apps on the same phone each get their own bucket as long
+         * as their UAs differ — which is the normal pattern (most HTTP
+         * libraries set a vendor UA by default).
+         */
+        val client: String = "anonymous",
     ) {
         /** Time spent in the queue waiting for the inference mutex. */
         fun queueWaitMs(now: Long = System.currentTimeMillis()): Long =
@@ -122,7 +131,8 @@ object RequestTracker {
         stream: Boolean,
         messageCount: Int,
         promptChars: Int,
-        maxDepth: Int
+        maxDepth: Int,
+        client: String = "anonymous",
     ): Entry? = mutex.withLock {
         if (_queue.value.size >= maxDepth) return@withLock null
         val entry = Entry(
@@ -132,11 +142,62 @@ object RequestTracker {
             messageCount = messageCount,
             promptChars = promptChars,
             state = State.QUEUED,
-            enqueuedAt = System.currentTimeMillis()
+            enqueuedAt = System.currentTimeMillis(),
+            client = client,
         )
         _queue.update { it + entry }
         _stats.update { it.copy(totalRequests = it.totalRequests + 1) }
         entry
+    }
+
+    /**
+     * Snapshot of per-client activity for the Dashboard "Top clients" panel.
+     * Aggregated lazily from [history] + [current] + [queue] — kept in sync
+     * implicitly without a separate state flow.
+     */
+    data class ClientSummary(
+        val client: String,
+        val inFlight: Int,
+        val queued: Int,
+        val completed: Long,
+        val errored: Long,
+        val totalChunks: Long,
+        val avgInferenceMs: Long,
+    )
+
+    /** Last [maxClients] clients seen, sorted by recency × volume. */
+    fun clientSummaries(maxClients: Int = 8): List<ClientSummary> {
+        val hist = _history.value
+        val cur = _current.value
+        val q = _queue.value
+        val all: List<Entry> = buildList {
+            addAll(hist)
+            cur?.let { add(it) }
+            addAll(q)
+        }
+        return all.groupBy { it.client }
+            .map { (client, entries) ->
+                val running = entries.count { it.state == State.RUNNING }
+                val queued = entries.count { it.state == State.QUEUED }
+                val completed = entries.count { it.state == State.COMPLETED }.toLong()
+                val errored = entries.count {
+                    it.state == State.ERRORED || it.state == State.CANCELLED
+                }.toLong()
+                val chunks = entries.sumOf { it.chunkCount.toLong() }
+                val infMs = entries.filter { it.state == State.COMPLETED }
+                    .sumOf { it.inferenceMs() }
+                ClientSummary(
+                    client = client,
+                    inFlight = running,
+                    queued = queued,
+                    completed = completed,
+                    errored = errored,
+                    totalChunks = chunks,
+                    avgInferenceMs = if (completed > 0) infMs / completed else 0L,
+                )
+            }
+            .sortedByDescending { it.completed + it.queued.toLong() + it.inFlight.toLong() }
+            .take(maxClients)
     }
 
     /**

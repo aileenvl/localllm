@@ -6,6 +6,52 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+#### Multi-client serving (Tier 1 + Tier 2)
+
+Designed for the "multiple sibling apps on the same phone share the LLM
+server" use case. The single LLM Engine is still the bottleneck (LiteRT-LM
+0.11.0 is single-stream per engine), so the work focuses on making waiting
+*visible* and the non-LLM endpoints *parallel*.
+
+**Tier 1 — wait is now transparent and embeddings parallelise the LLM:**
+- **Batched embeddings.** `EmbeddingService.embed(texts)` now runs one
+  ONNX call with a `[batch, maxSeqLen]` tensor instead of N serial calls.
+  Expected ~5x throughput improvement on `POST /v1/embeddings` with
+  multi-text input arrays.
+- **Embedding and LLM mutexes already decoupled** (documenting the
+  invariant): the `/v1/embeddings` route never touches the LLM
+  `inferenceMutex`, and `EmbeddingService` holds its own mutex. A long
+  chat generation in flight doesn't block embedding calls; an embeddings
+  batch doesn't block chat.
+- **Queue-position response headers** on `POST /v1/chat/completions`:
+  `X-Queue-Position`, `X-Queue-Depth`, `X-Estimated-Wait-Ms`,
+  `X-Request-Id`, `X-Client-Id`. Sibling apps can show a calm "you're 3rd
+  in line, ~12 s wait" UI instead of a hung spinner. Headers flush
+  before the first SSE byte so streaming clients see them up front.
+
+**Tier 2 — fairness and observability:**
+- **Cooperative cancellation on client disconnect** (was already wired,
+  now documented as guaranteed): when an HTTP client drops the TCP
+  connection, Ktor cancels the call's coroutine, `CancellationException`
+  triggers `Conversation.cancelProcess()` on the native engine, and the
+  in-flight request is marked `CANCELLED`. Resources release within
+  ~100 ms of disconnect instead of pinned until generation completes.
+- **Per-client token-bucket rate limiting** keyed on `User-Agent`.
+  Configured via new Settings entries `KEY_RATE_LIMIT_PER_SEC` (default 0
+  = disabled) and `KEY_RATE_LIMIT_BURST` (default 10). Returns `429` +
+  `Retry-After: <seconds>` + `X-RateLimit-Client: <ua>` when a bucket is
+  empty. Sibling apps with distinct UAs get isolated buckets at zero UI
+  cost.
+- **Per-client metrics in Dashboard.** `RequestTracker.Entry` now carries
+  a `client` field; `clientSummaries()` aggregates current/queue/history
+  by client and surfaces an inline "Clients" card showing per-client
+  completed/errored/chunks/avg-latency plus running/queued state.
+  Answers "is one sibling app monopolising the server?" at a glance.
+- **5 new unit tests** for `RateLimiter` covering burst draining, per-
+  client isolation, refill rate, `Retry-After` rounding, and `reset()`.
+
 ### Fixed
 
 #### Engine init on Google Tensor SoCs (Pixel 6 / Pixel 10) — with visible feedback

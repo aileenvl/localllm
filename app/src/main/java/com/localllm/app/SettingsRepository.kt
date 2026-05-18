@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.SharedPreferencesMigration
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
@@ -96,6 +97,12 @@ class SettingsRepository private constructor(context: Context) {
     private val _apiKey = MutableStateFlow("")
     val apiKey: StateFlow<String> = _apiKey.asStateFlow()
 
+    private val _rateLimitPerSec = MutableStateFlow(Settings.DEFAULT_RATE_LIMIT_PER_SEC)
+    val rateLimitPerSec: StateFlow<Double> = _rateLimitPerSec.asStateFlow()
+
+    private val _rateLimitBurst = MutableStateFlow(Settings.DEFAULT_RATE_LIMIT_BURST)
+    val rateLimitBurst: StateFlow<Double> = _rateLimitBurst.asStateFlow()
+
     private val _keepAwake = MutableStateFlow(true)
     val keepAwake: StateFlow<Boolean> = _keepAwake.asStateFlow()
 
@@ -141,6 +148,8 @@ class SettingsRepository private constructor(context: Context) {
         _maxQueueDepth.value = p[KEY_MAX_QUEUE_DEPTH] ?: Settings.DEFAULT_MAX_QUEUE_DEPTH
         _maxPromptChars.value = p[KEY_MAX_PROMPT_CHARS] ?: Settings.DEFAULT_MAX_PROMPT_CHARS
         _apiKey.value = p[KEY_API_KEY] ?: ""
+        _rateLimitPerSec.value = p[KEY_RATE_LIMIT_PER_SEC] ?: Settings.DEFAULT_RATE_LIMIT_PER_SEC
+        _rateLimitBurst.value = p[KEY_RATE_LIMIT_BURST] ?: Settings.DEFAULT_RATE_LIMIT_BURST
         _keepAwake.value = p[KEY_KEEP_AWAKE] ?: true
         _idleEvictMs.value = p[KEY_IDLE_EVICT_MS] ?: Settings.DEFAULT_IDLE_EVICT_MS
         _idleStopMs.value = p[KEY_IDLE_STOP_MS] ?: Settings.DEFAULT_IDLE_STOP_MS
@@ -223,6 +232,18 @@ class SettingsRepository private constructor(context: Context) {
         _apiKey.value = safe
     }
 
+    fun setRateLimitPerSec(value: Double) {
+        val safe = value.coerceIn(0.0, 1000.0)
+        writeBlocking { it[KEY_RATE_LIMIT_PER_SEC] = safe }
+        _rateLimitPerSec.value = safe
+    }
+
+    fun setRateLimitBurst(value: Double) {
+        val safe = value.coerceIn(1.0, 10_000.0)
+        writeBlocking { it[KEY_RATE_LIMIT_BURST] = safe }
+        _rateLimitBurst.value = safe
+    }
+
     fun setKeepAwake(value: Boolean) {
         writeBlocking { it[KEY_KEEP_AWAKE] = value }
         _keepAwake.value = value
@@ -272,6 +293,8 @@ class SettingsRepository private constructor(context: Context) {
         _maxQueueDepth.value = Settings.DEFAULT_MAX_QUEUE_DEPTH
         _maxPromptChars.value = Settings.DEFAULT_MAX_PROMPT_CHARS
         _apiKey.value = ""
+        _rateLimitPerSec.value = Settings.DEFAULT_RATE_LIMIT_PER_SEC
+        _rateLimitBurst.value = Settings.DEFAULT_RATE_LIMIT_BURST
         _keepAwake.value = true
         _idleEvictMs.value = Settings.DEFAULT_IDLE_EVICT_MS
         _idleStopMs.value = Settings.DEFAULT_IDLE_STOP_MS
@@ -299,6 +322,8 @@ class SettingsRepository private constructor(context: Context) {
         private val KEY_MAX_QUEUE_DEPTH = intPreferencesKey(Settings.KEY_MAX_QUEUE_DEPTH)
         private val KEY_MAX_PROMPT_CHARS = intPreferencesKey(Settings.KEY_MAX_PROMPT_CHARS)
         private val KEY_API_KEY = stringPreferencesKey(Settings.KEY_API_KEY)
+        private val KEY_RATE_LIMIT_PER_SEC = doublePreferencesKey(Settings.KEY_RATE_LIMIT_PER_SEC)
+        private val KEY_RATE_LIMIT_BURST = doublePreferencesKey(Settings.KEY_RATE_LIMIT_BURST)
         private val KEY_KEEP_AWAKE = booleanPreferencesKey(Settings.KEY_KEEP_AWAKE)
         private val KEY_IDLE_EVICT_MS = longPreferencesKey(Settings.KEY_IDLE_EVICT_MS)
         private val KEY_IDLE_STOP_MS = longPreferencesKey(Settings.KEY_IDLE_STOP_MS)

@@ -205,6 +205,17 @@ class LLMServerService : Service() {
     private val gson = Gson()
 
     /**
+     * Token-bucket rate limiter keyed on the request's `User-Agent` header.
+     * Lazily reconfigured on each request from the Settings flow — cheap
+     * (volatile var write) and means changing the per-second rate in the
+     * UI takes effect on the next call without restarting the service.
+     */
+    private val rateLimiter = RateLimiter(
+        ratePerSec = Settings.DEFAULT_RATE_LIMIT_PER_SEC,
+        burst = Settings.DEFAULT_RATE_LIMIT_BURST,
+    )
+
+    /**
      * Lazy ObjectBox-backed document store. Opens on first /v1/documents or
      * /v1/search request; closed in onDestroy.
      */
@@ -839,6 +850,32 @@ class LLMServerService : Service() {
                         if (!authorize(call)) return@post
                         lastActivityAt.set(System.currentTimeMillis())
 
+                        // Per-client rate limit. Identity is the User-Agent
+                        // header — sibling apps each send their own UA by
+                        // default, so this gives them isolated buckets without
+                        // any explicit per-app key management. When the limit
+                        // is disabled (rate=0 in Settings) tryAcquire is a no-op.
+                        val clientId = call.request.headers["User-Agent"]?.takeIf { it.isNotBlank() } ?: "anonymous"
+                        val rate = Settings.rateLimitPerSec(this@LLMServerService)
+                        if (rate > 0.0) {
+                            rateLimiter.ratePerSec = rate
+                            rateLimiter.burst = Settings.rateLimitBurst(this@LLMServerService)
+                            val retryAfter = rateLimiter.tryAcquire(clientId)
+                            if (retryAfter != null) {
+                                call.response.headers.append("Retry-After", retryAfter.toString())
+                                call.response.headers.append("X-RateLimit-Client", clientId)
+                                call.respond(
+                                    HttpStatusCode.TooManyRequests,
+                                    ErrorResponse(ErrorDetails(
+                                        message = "Rate limit for client '$clientId' exhausted; retry in ${retryAfter}s.",
+                                        type = "rate_limit_error",
+                                        code = 429
+                                    ))
+                                )
+                                return@post
+                            }
+                        }
+
                         // Pre-parse body-size guard. The prompt-char cap below
                         // fires AFTER JSON parsing, which is too late if the
                         // body itself is huge. ~2 bytes per char covers JSON
@@ -897,7 +934,8 @@ class LLMServerService : Service() {
                             stream = req.stream,
                             messageCount = req.messages.size,
                             promptChars = promptChars,
-                            maxDepth = maxDepth
+                            maxDepth = maxDepth,
+                            client = clientId,
                         )
                         if (entry == null) {
                             call.response.headers.append("Retry-After", "5")
@@ -912,9 +950,27 @@ class LLMServerService : Service() {
                             return@post
                         }
 
+                        // Queue-position feedback. Position is 1-based and
+                        // counts ahead-of-us (entries that need to grab the
+                        // inference mutex before this one). Estimated wait is
+                        // queue_position × recent avg inference time, clamped
+                        // to be positive. Both headers are sent before the
+                        // response body so SSE clients can render a progress
+                        // hint immediately, without waiting for the first
+                        // token.
+                        val queueDepth = RequestTracker.queue.value.size
+                        val queuePosition = RequestTracker.queue.value.indexOfFirst { it.id == entry.id } + 1
+                        val avgInfMs = RequestTracker.stats.value.avgLatencyMs
+                        val estimatedWaitMs = (queuePosition - 1).coerceAtLeast(0) * avgInfMs
+                        call.response.headers.append("X-Queue-Position", queuePosition.toString())
+                        call.response.headers.append("X-Queue-Depth", queueDepth.toString())
+                        call.response.headers.append("X-Estimated-Wait-Ms", estimatedWaitMs.toString())
+                        call.response.headers.append("X-Request-Id", entry.id)
+                        call.response.headers.append("X-Client-Id", clientId)
+
                         // Client origin — useful when multiple apps share the server
                         val remoteIp = call.request.local.remoteHost
-                        val ua = call.request.headers["User-Agent"] ?: "-"
+                        val ua = clientId
                         val timeoutMs = Settings.requestTimeoutMs(this@LLMServerService)
 
                         // Session lifecycle: resolved once outside the inference, committed
