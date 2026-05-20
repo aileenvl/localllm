@@ -80,7 +80,12 @@ object Settings {
             n.contains("hexagon") ||
             n.startsWith("libqnn") ||
             n.contains("neuron") ||
-            n.startsWith("libapu")
+            n.startsWith("libapu") ||
+            // LiteRT NPU dispatch libs (publicly released via
+            // github.com/google-ai-edge/LiteRT/releases v2.1.1).
+            // The Tensor variant ships as libLiteRtDispatch_GoogleTensor.so;
+            // Qualcomm and MediaTek follow the same naming.
+            n.startsWith("liblitertdispatch_")
         }
     }
 
