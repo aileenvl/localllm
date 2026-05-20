@@ -8,6 +8,35 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+#### Bundle the Google Tensor NPU dispatch lib + LiteRT-LM 0.12.0
+
+The LiteRT NPU runtime is no longer early-access. The Google Tensor
+dispatch lib (`libLiteRtDispatch_GoogleTensor.so`, 400 KB, supports
+Tensor G3/G4/G5) is now publicly released at
+[github.com/google-ai-edge/LiteRT/releases][1] in
+`litert_npu_runtime_libraries.zip` (v2.1.1). We ship it in
+`app/src/main/jniLibs/arm64-v8a/` so it lands in the APK's
+`nativeLibraryDir` automatically.
+
+Combined with the existing `Backend.NPU(nativeLibraryDir)` wiring, this
+means **the NPU/TPU pill in Settings auto-enables on Pixel 6 / 9 / 10**
+(`Build.SOC_MODEL` matches `tensor*` AND a `liblitertdispatch_*.so` is
+detected). Picking it sends inference through the dispatch lib — but
+init still requires a SoC-compiled model. With a stock CPU/GPU
+`.litertlm` the call fails with `TF_LITE_AUX not found in the model`,
+which is the model not having the Tensor-compiled section, *not* a
+delegate problem.
+
+Use `tooling/tensor-aot/` (committed in `2ebd5ee`) to compile a stock
+Gemma `.litertlm` into a Tensor-G5-runnable variant on a Mac via Docker.
+Push the output, pick NPU, and inference runs on the TPU. Sample-app
+numbers: NPU ~10× faster than CPU on a same-generation Snapdragon.
+
+Also bumped `litertlm-android` 0.11.0 → 0.12.0 (latest, released
+2026-05-18). Backend API unchanged; minor bug fixes pulled in.
+
+[1]: https://github.com/google-ai-edge/LiteRT/releases
+
 #### Multi-client serving (Tier 1 + Tier 2)
 
 Designed for the "multiple sibling apps on the same phone share the LLM
