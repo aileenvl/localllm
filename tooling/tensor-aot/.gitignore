@@ -1,0 +1,12 @@
+# Local AOT compilation outputs — gigabyte-class model artifacts that
+# should never end up in version control.
+compiled/
+*.litertlm
+*.tflite
+# The compiler binary itself (166 MB ELF) is gated behind Tensor SDK
+# Beta — keep it out of the repo too, even if a user accidentally
+# drops it in here.
+*.so
+# Local Python cache from host-side syntax checks.
+__pycache__/
+*.pyc
