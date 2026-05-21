@@ -11,6 +11,34 @@ Pixel TPU instead of the CPU.
 > from this compiler — they're in the Tensor SDK Beta portal alongside
 > the host compiler you already have. See "Missing piece" below.
 
+> ## Important: scope limit for LLMs
+>
+> The Tensor SDK Beta compiler operates on raw **TFLite flatbuffers**
+> (magic `TFL3`). LiteRT-LM `.litertlm` files (magic `RTLM`) are a
+> higher-level container that wraps a TFLite model alongside LLM
+> metadata — tokenizer, prompt template, KV cache budget, sampler
+> defaults. The SDK does **not** know how to unpack and repackage that
+> container.
+>
+> So this pipeline will compile a raw `.tflite` for Tensor G5 (the
+> typical vision / classification case), but feeding it the stock
+> Gemma `.litertlm` returns:
+>
+> ```
+> ERROR: Model provided has model identifier 'RTLM', should be 'TFL3'
+> ```
+>
+> The unpack/repack tooling for `.litertlm` is internal to Google. The
+> only way to actually run Gemma on a Tensor TPU today is for Google
+> to publish a pre-compiled `_Google_Tensor_G5.litertlm` (the
+> `litert-community/Gemma3-1B-IT` repo already publishes
+> Qualcomm/MediaTek variants — no Tensor entry yet). This pipeline is
+> in place and ready to run those, but the LLM input shape is the
+> blocker. Tracking [b/475410468][bug-id] (the comment in the SDK
+> stub's setup.py points at the same milestone).
+>
+> [bug-id]: https://b.corp.google.com/issues/475410468
+
 ## Prerequisites
 
 1. **Docker Desktop** with `linux/amd64` emulation enabled (default on

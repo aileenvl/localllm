@@ -86,12 +86,27 @@ def main() -> int:
     print(f"            input  = {args.model.resolve()}")
     print(f"            output = {args.out.resolve()}")
 
-    result = aot_compile(
-        input_model=str(args.model.resolve()),
-        output_dir=str(args.out.resolve()),
-        target=[target],
-        keep_going=args.keep_going,
-    )
+    try:
+        result = aot_compile(
+            input_model=str(args.model.resolve()),
+            output_dir=str(args.out.resolve()),
+            target=[target],
+            keep_going=args.keep_going,
+        )
+    except ValueError as e:
+        # The plugin (the host .so) typically reports detailed errors by
+        # writing them to /tmp/<random>.error and raising a ValueError
+        # whose message points at the file. The container's /tmp is
+        # ephemeral — surface the contents before we lose them.
+        msg = str(e)
+        import re
+        for path in re.findall(r"/tmp/[^\s]+?\.error", msg):
+            try:
+                detail = Path(path).read_text(errors="replace")
+                print(f"compile.py: plugin error file {path}:\n--- begin {path} ---\n{detail}\n--- end {path} ---", file=sys.stderr)
+            except Exception as read_err:
+                print(f"compile.py: could not read {path}: {read_err}", file=sys.stderr)
+        raise
 
     # CompilationResult shape is not publicly documented but the upstream
     # AOT tutorial treats it as an iterable of compiled-model wrappers.
