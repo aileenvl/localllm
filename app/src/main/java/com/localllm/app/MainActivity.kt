@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Settings
@@ -69,6 +70,7 @@ import com.localllm.app.ui.AppTab
 import com.localllm.app.ui.ChatTab
 import com.localllm.app.ui.ConsoleTab
 import com.localllm.app.ui.DashboardTab
+import com.localllm.app.ui.DocumentsTab
 import com.localllm.app.ui.ModelsTab
 import com.localllm.app.ui.SettingsTab
 import com.localllm.app.ui.StatusDot
@@ -89,7 +91,7 @@ import kotlinx.coroutines.withContext
  *
  *   1. Own the cross-tab UI state (active tab, model list, chat messages…).
  *   2. Run lifecycle effects (file picker, model directory polling, autostart).
- *   3. Compose a Material 3 [Scaffold] with a compact top app bar and a 5-item
+ *   3. Compose a Material 3 [Scaffold] with a compact top app bar and a 6-item
  *      bottom navigation bar; render the right tab's composable in the body.
  *
  * All tab contents and presentation logic live in [com.localllm.app.ui].
@@ -409,6 +411,13 @@ class MainActivity : ComponentActivity() {
                                     clearChatTrigger = clearChatTrigger,
                                     onClearChat = { chatMessages.clear() },
                                 )
+                                AppTab.DOCUMENTS -> Box(Modifier.padding(16.dp)) {
+                                    DocumentsTab(
+                                        serverStatus = serverStatus,
+                                        baseUrl = serverUrl,
+                                        apiKey = Settings.apiKey(context),
+                                    )
+                                }
                                 AppTab.SETTINGS -> Box(Modifier.padding(16.dp)) {
                                     SettingsTab(
                                         context = context,
@@ -610,6 +619,7 @@ private fun iconForTab(tab: AppTab): ImageVector = when (tab) {
     AppTab.DASHBOARD -> Icons.Outlined.BarChart
     AppTab.CONSOLE -> Icons.Outlined.Terminal
     AppTab.CHAT -> Icons.AutoMirrored.Outlined.Chat
+    AppTab.DOCUMENTS -> Icons.Outlined.Description
     AppTab.SETTINGS -> Icons.Outlined.Settings
 }
 

@@ -15,6 +15,7 @@ enum class AppTab(@StringRes val labelRes: Int) {
     DASHBOARD(R.string.tab_dashboard),
     CONSOLE(R.string.tab_console),
     CHAT(R.string.tab_chat),
+    DOCUMENTS(R.string.tab_documents),
     SETTINGS(R.string.tab_settings)
 }
 
