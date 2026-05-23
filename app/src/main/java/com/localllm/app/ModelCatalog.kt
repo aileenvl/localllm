@@ -174,7 +174,7 @@ val AVAILABLE_MODELS: List<ModelInfo> = listOf(
         // tooling/tensor-aot/ISSUE-google-ai-edge-litert.md.
         id = "gemma3-1b-it-npu-tensor-g5",
         name = "Gemma 3 1B IT · NPU (Tensor G5)",
-        description = "NPU-compiled Gemma 3 1B for Google Tensor G5 (Pixel 10). ~700 MB. Runs on the Tensor TPU via bundled dispatch lib — no extra runtime install.",
+        description = "NPU-compiled Gemma 3 1B for Google Tensor G5 (Pixel 10). ~1.68 GB (q8 quantization — larger than the q4 Qualcomm/MediaTek variants). Runs on the Tensor TPU via bundled dispatch lib — no extra runtime install.",
         url = "$NPU_REPO/Gemma3-1B-IT_q8_ekv1280_Google_Tensor_G5.litertlm",
         filename = "gemma3-1b-it-npu-tensor-g5.litertlm",
         // Pixel 10's Tensor G5 reports SoC codename "LAGUNA" via

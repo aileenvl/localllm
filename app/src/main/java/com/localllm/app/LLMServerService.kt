@@ -733,7 +733,7 @@ class LLMServerService : Service() {
                             // the same id is an upsert, not a duplicate.
                             documentStore().deleteDocument(tenantId, req.id)
                             documentStore().put(entities)
-                            respondWithTenant(
+                            call.respondWithTenant(
                                 tenantId,
                                 DocumentSummaryResponse(
                                     documentId = req.id,
@@ -765,7 +765,7 @@ class LLMServerService : Service() {
                                 tenantId = tenantId,
                             )
                         }
-                        respondWithTenant(
+                        call.respondWithTenant(
                             tenantId,
                             DocumentListResponse(data = summaries, tenantId = tenantId),
                         )
@@ -783,7 +783,7 @@ class LLMServerService : Service() {
                             return@delete
                         }
                         val n = documentStore().deleteDocument(tenantId, id)
-                        respondWithTenant(
+                        call.respondWithTenant(
                             tenantId,
                             DocumentDeleteResponse(
                                 documentId = id,
@@ -883,7 +883,7 @@ class LLMServerService : Service() {
                                     metadata = metaJson,
                                 )
                             }
-                            respondWithTenant(
+                            call.respondWithTenant(
                                 tenantId,
                                 SearchResponse(data = hits, model = req.model, tenantId = tenantId),
                             )
