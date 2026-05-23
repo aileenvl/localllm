@@ -42,6 +42,7 @@ fun ModelInfo.npuSocLabel(): String? = when (requiredSocMarker?.lowercase()) {
     "mt6989" -> "Dimensity 9300 (MT6989)"
     "mt6991" -> "Dimensity 9400 (MT6991)"
     "mt6993" -> "Dimensity 9500 (MT6993)"
+    "laguna" -> "Google Tensor G5 (Pixel 10)"
     null -> null
     else -> requiredSocMarker.uppercase()
 }
@@ -163,5 +164,21 @@ val AVAILABLE_MODELS: List<ModelInfo> = listOf(
         url = "$NPU_REPO/Gemma3-1B-IT_q4_ekv1280_mt6993.litertlm",
         filename = "gemma3-1b-it-npu-mt6993.litertlm",
         requiredSocMarker = "mt6993",
+    ),
+    ModelInfo(
+        // Tensor G5 (Pixel 10) variant. Uses int8 quantization with KV
+        // budget 1280 — the only one Google has published for the Tensor
+        // family so far. Runs via `Backend.NPU(nativeLibraryDir)` against
+        // libLiteRtDispatch_GoogleTensor.so already bundled in jniLibs.
+        // No Gemma 4 Tensor variant exists upstream — see
+        // tooling/tensor-aot/ISSUE-google-ai-edge-litert.md.
+        id = "gemma3-1b-it-npu-tensor-g5",
+        name = "Gemma 3 1B IT · NPU (Tensor G5)",
+        description = "NPU-compiled Gemma 3 1B for Google Tensor G5 (Pixel 10). ~700 MB. Runs on the Tensor TPU via bundled dispatch lib — no extra runtime install.",
+        url = "$NPU_REPO/Gemma3-1B-IT_q8_ekv1280_Google_Tensor_G5.litertlm",
+        filename = "gemma3-1b-it-npu-tensor-g5.litertlm",
+        // Pixel 10's Tensor G5 reports SoC codename "LAGUNA" via
+        // ro.soc.model — not "Tensor G5". Verified on a Frankel device.
+        requiredSocMarker = "laguna",
     ),
 )
