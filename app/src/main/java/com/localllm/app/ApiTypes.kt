@@ -317,17 +317,20 @@ data class DocumentSummaryResponse(
     @SerializedName("document_id") val documentId: String,
     @SerializedName("chunk_count") val chunkCount: Int,
     val model: String,
+    @SerializedName("tenant_id") val tenantId: String,
 )
 
 data class DocumentListResponse(
     val `object`: String = "list",
     val data: List<DocumentSummaryResponse>,
+    @SerializedName("tenant_id") val tenantId: String,
 )
 
 data class DocumentDeleteResponse(
     @SerializedName("document_id") val documentId: String,
     val deleted: Boolean,
     @SerializedName("chunks_removed") val chunksRemoved: Int,
+    @SerializedName("tenant_id") val tenantId: String,
 )
 
 data class SearchRequest(
@@ -348,4 +351,22 @@ data class SearchResponse(
     val `object`: String = "list",
     val data: List<SearchHit>,
     val model: String,
+    @SerializedName("tenant_id") val tenantId: String,
+)
+
+data class TenantSummaryResponse(
+    @SerializedName("tenant_id") val tenantId: String,
+    @SerializedName("document_count") val documentCount: Int,
+    @SerializedName("chunk_count") val chunkCount: Int,
+)
+
+data class TenantListResponse(
+    val `object`: String = "list",
+    val data: List<TenantSummaryResponse>,
+)
+
+data class TenantDeleteResponse(
+    @SerializedName("tenant_id") val tenantId: String,
+    val deleted: Boolean,
+    @SerializedName("chunks_removed") val chunksRemoved: Int,
 )

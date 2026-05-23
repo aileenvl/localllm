@@ -17,7 +17,26 @@
     <string name="tab_dashboard">Dashboard</string>
     <string name="tab_console">Console</string>
     <string name="tab_chat">Chat</string>
+    <string name="tab_documents">Docs</string>
     <string name="tab_settings">Settings</string>
+
+    <!-- Documents tab (RAG corpus) -->
+    <string name="documents_title">Document corpus</string>
+    <string name="documents_tenant">Tenant: %1$s</string>
+    <string name="documents_refresh">Refresh list</string>
+    <string name="documents_server_stopped">Start the server in Settings to ingest and search documents.</string>
+    <string name="documents_id_label">Document id (optional)</string>
+    <string name="documents_id_placeholder">auto-generated if empty</string>
+    <string name="documents_ingest_label">Paste text to ingest</string>
+    <string name="documents_ingest_placeholder">Notes, FAQ, or any plain text…</string>
+    <string name="documents_ingest_action">Ingest &amp; embed</string>
+    <string name="documents_ingest_empty">Paste some text before ingesting.</string>
+    <string name="documents_search_label">Semantic search</string>
+    <string name="documents_list_heading">Ingested documents (%1$d)</string>
+    <string name="documents_row_meta">%1$d chunks · %2$s</string>
+    <string name="documents_delete">Delete document</string>
+    <string name="documents_search_results">Search hits (%1$d)</string>
+    <string name="documents_hit_header">%1$s #%2$d · score %3$.3f</string>
 
     <!-- Models tab -->
     <string name="models_import">Import .litertlm file from device</string>

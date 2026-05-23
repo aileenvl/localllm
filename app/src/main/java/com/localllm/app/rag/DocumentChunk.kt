@@ -27,6 +27,8 @@ import io.objectbox.annotation.VectorDistanceType
 @Entity
 data class DocumentChunk(
     @Id var id: Long = 0,
+    /** Per-client RAG namespace — see issue #4 multi-tenant isolation. */
+    @Index var tenantId: String = "",
     @Index var documentId: String = "",
     var chunkIndex: Int = 0,
     var text: String = "",
@@ -43,6 +45,7 @@ data class DocumentChunk(
         if (this === other) return true
         if (other !is DocumentChunk) return false
         return id == other.id &&
+            tenantId == other.tenantId &&
             documentId == other.documentId &&
             chunkIndex == other.chunkIndex &&
             text == other.text &&
@@ -53,6 +56,7 @@ data class DocumentChunk(
 
     override fun hashCode(): Int {
         var h = id.hashCode()
+        h = 31 * h + tenantId.hashCode()
         h = 31 * h + documentId.hashCode()
         h = 31 * h + chunkIndex
         h = 31 * h + text.hashCode()
