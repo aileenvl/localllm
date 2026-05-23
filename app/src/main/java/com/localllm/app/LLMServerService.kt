@@ -21,6 +21,7 @@ import io.ktor.server.request.*
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.ContentType
 import io.ktor.http.CacheControl
+import com.localllm.app.rag.resolveTenantFromHeaders
 import io.ktor.utils.io.*
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Content
@@ -649,6 +650,7 @@ class LLMServerService : Service() {
                     post("/v1/documents") {
                         if (!authorize(call)) return@post
                         lastActivityAt.set(System.currentTimeMillis())
+                        val tenantId = tenantFromCall(call)
 
                         val req = try {
                             call.receive<DocumentRequest>()
@@ -718,6 +720,7 @@ class LLMServerService : Service() {
                             val metadataStr = req.metadata?.toString()
                             val entities = chunks.mapIndexed { i, text ->
                                 com.localllm.app.rag.DocumentChunk(
+                                    tenantId = tenantId,
                                     documentId = req.id,
                                     chunkIndex = i,
                                     text = text,
@@ -728,13 +731,17 @@ class LLMServerService : Service() {
                             }
                             // Replace prior chunks for this id so re-POSTing
                             // the same id is an upsert, not a duplicate.
-                            documentStore().deleteDocument(req.id)
+                            documentStore().deleteDocument(tenantId, req.id)
                             documentStore().put(entities)
-                            call.respond(DocumentSummaryResponse(
-                                documentId = req.id,
-                                chunkCount = entities.size,
-                                model = req.model,
-                            ))
+                            respondWithTenant(
+                                tenantId,
+                                DocumentSummaryResponse(
+                                    documentId = req.id,
+                                    chunkCount = entities.size,
+                                    model = req.model,
+                                    tenantId = tenantId,
+                                ),
+                            )
                         } catch (e: Throwable) {
                             LogManager.e("LLMServerService", "Document ingest failed: ${e.message}", e)
                             call.respond(
@@ -749,18 +756,24 @@ class LLMServerService : Service() {
 
                     get("/v1/documents") {
                         if (!authorize(call)) return@get
-                        val summaries = documentStore().listDocuments().map {
+                        val tenantId = tenantFromCall(call)
+                        val summaries = documentStore().listDocuments(tenantId).map {
                             DocumentSummaryResponse(
                                 documentId = it.documentId,
                                 chunkCount = it.chunkCount,
                                 model = it.embeddingModel,
+                                tenantId = tenantId,
                             )
                         }
-                        call.respond(DocumentListResponse(data = summaries))
+                        respondWithTenant(
+                            tenantId,
+                            DocumentListResponse(data = summaries, tenantId = tenantId),
+                        )
                     }
 
                     delete("/v1/documents/{id}") {
                         if (!authorize(call)) return@delete
+                        val tenantId = tenantFromCall(call)
                         val id = call.parameters["id"]
                         if (id.isNullOrBlank()) {
                             call.respond(
@@ -769,9 +782,45 @@ class LLMServerService : Service() {
                             )
                             return@delete
                         }
-                        val n = documentStore().deleteDocument(id)
-                        call.respond(DocumentDeleteResponse(
-                            documentId = id,
+                        val n = documentStore().deleteDocument(tenantId, id)
+                        respondWithTenant(
+                            tenantId,
+                            DocumentDeleteResponse(
+                                documentId = id,
+                                deleted = n > 0,
+                                chunksRemoved = n,
+                                tenantId = tenantId,
+                            ),
+                        )
+                    }
+
+                    /* ----- /v1/tenants (admin — global view, not tenant-scoped) ----- */
+
+                    get("/v1/tenants") {
+                        if (!authorize(call)) return@get
+                        val summaries = documentStore().listTenants().map {
+                            TenantSummaryResponse(
+                                tenantId = it.tenantId,
+                                documentCount = it.documentCount,
+                                chunkCount = it.chunkCount,
+                            )
+                        }
+                        call.respond(TenantListResponse(data = summaries))
+                    }
+
+                    delete("/v1/tenants/{tenantId}") {
+                        if (!authorize(call)) return@delete
+                        val tenantId = call.parameters["tenantId"]?.trim()?.lowercase().orEmpty()
+                        if (tenantId.isBlank()) {
+                            call.respond(
+                                HttpStatusCode.BadRequest,
+                                ErrorResponse(ErrorDetails("tenantId is required", "invalid_request_error", 400))
+                            )
+                            return@delete
+                        }
+                        val n = documentStore().deleteTenant(tenantId)
+                        call.respond(TenantDeleteResponse(
+                            tenantId = tenantId,
                             deleted = n > 0,
                             chunksRemoved = n,
                         ))
@@ -782,6 +831,7 @@ class LLMServerService : Service() {
                     post("/v1/search") {
                         if (!authorize(call)) return@post
                         lastActivityAt.set(System.currentTimeMillis())
+                        val tenantId = tenantFromCall(call)
 
                         val req = try { call.receive<SearchRequest>() } catch (e: Exception) {
                             call.respond(
@@ -817,7 +867,7 @@ class LLMServerService : Service() {
 
                         try {
                             val queryVec = svc.embed(listOf(req.query)).first().first
-                            val hits = documentStore().nearest(queryVec, k, req.model).map { (chunk, distance) ->
+                            val hits = documentStore().nearest(tenantId, queryVec, k, req.model).map { (chunk, distance) ->
                                 // ObjectBox DOT_PRODUCT distance is `1 - cosine` for
                                 // unit-norm vectors. Surface cosine so clients see
                                 // numbers in the familiar [-1, 1] range.
@@ -833,7 +883,10 @@ class LLMServerService : Service() {
                                     metadata = metaJson,
                                 )
                             }
-                            call.respond(SearchResponse(data = hits, model = req.model))
+                            respondWithTenant(
+                                tenantId,
+                                SearchResponse(data = hits, model = req.model, tenantId = tenantId),
+                            )
                         } catch (e: Throwable) {
                             LogManager.e("LLMServerService", "Search failed: ${e.message}", e)
                             call.respond(
@@ -1332,6 +1385,22 @@ class LLMServerService : Service() {
             )
         }
         return ok
+    }
+
+    /** Resolve the RAG tenant for [call] — see `resolveTenantFromHeaders`. */
+    private fun tenantFromCall(call: ApplicationCall): String =
+        resolveTenantFromHeaders(
+            clientId = call.request.headers["X-Client-Id"],
+            userAgent = call.request.headers["User-Agent"],
+        )
+
+    /** Attach `X-Tenant-Id` and emit a JSON body that includes `tenant_id`. */
+    private suspend inline fun <reified T : Any> ApplicationCall.respondWithTenant(
+        tenantId: String,
+        body: T,
+    ) {
+        response.headers.append("X-Tenant-Id", tenantId)
+        respond(body)
     }
 
     /**

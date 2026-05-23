@@ -5,7 +5,7 @@
   "entities": [
     {
       "id": "1:4666322205355103377",
-      "lastPropertyId": "7:4137625347179287682",
+      "lastPropertyId": "8:5829164738291047365",
       "name": "DocumentChunk",
       "properties": [
         {
@@ -13,6 +13,13 @@
           "name": "id",
           "type": 6,
           "flags": 1
+        },
+        {
+          "id": "8:5829164738291047365",
+          "name": "tenantId",
+          "indexId": "3:9182736450918273645",
+          "type": 9,
+          "flags": 2048
         },
         {
           "id": "2:2016911524440942947",
@@ -53,7 +60,7 @@
     }
   ],
   "lastEntityId": "1:4666322205355103377",
-  "lastIndexId": "2:830951815790880836",
+  "lastIndexId": "3:9182736450918273645",
   "lastRelationId": "0:0",
   "lastSequenceId": "0:0",
   "modelVersion": 5,
@@ -62,5 +69,5 @@
   "retiredIndexUids": [],
   "retiredPropertyUids": [],
   "retiredRelationUids": [],
-  "version": 1
+  "version": 2
 }

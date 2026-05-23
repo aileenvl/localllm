@@ -6,7 +6,6 @@ import io.objectbox.Box
 import io.objectbox.BoxStore
 import io.objectbox.kotlin.boxFor
 import io.objectbox.kotlin.query
-import io.objectbox.query.QueryBuilder
 
 /**
  * Thin wrapper around ObjectBox holding the document-chunk box. One instance
@@ -26,6 +25,27 @@ class DocumentStore(context: Context) {
 
     private val box: Box<DocumentChunk> = store.boxFor()
 
+    init {
+        migrateLegacyTenantIds()
+    }
+
+    /**
+     * Pre-multi-tenant chunks had `tenantId = ""`. Bucket them under
+     * `"anonymous"` so curl / legacy clients still see their corpus.
+     */
+    private fun migrateLegacyTenantIds() {
+        val legacy = box.query(DocumentChunk_.tenantId.equal(""))
+            .build()
+            .use { it.find() }
+        if (legacy.isEmpty()) return
+        legacy.forEach { it.tenantId = "anonymous" }
+        box.put(legacy)
+        LogManager.i(
+            "DocumentStore",
+            "Migrated ${legacy.size} legacy chunk(s) to tenant 'anonymous'",
+        )
+    }
+
     fun count(): Long = box.count()
 
     /** Persist a freshly-built set of chunks for one document. */
@@ -34,20 +54,25 @@ class DocumentStore(context: Context) {
         box.put(chunks)
     }
 
-    /** All chunks belonging to [documentId], ordered by [DocumentChunk.chunkIndex]. */
-    fun byDocument(documentId: String): List<DocumentChunk> =
-        box.query(DocumentChunk_.documentId.equal(documentId))
+    /** All chunks belonging to [documentId] within [tenantId], ordered by [DocumentChunk.chunkIndex]. */
+    fun byDocument(tenantId: String, documentId: String): List<DocumentChunk> =
+        box.query(
+            DocumentChunk_.documentId.equal(documentId)
+                .and(DocumentChunk_.tenantId.equal(tenantId)),
+        )
             .order(DocumentChunk_.chunkIndex)
             .build()
             .use { it.find() }
 
     /**
-     * Distinct document ids present in the store, paired with the count of
+     * Distinct document ids for [tenantId], paired with the count of
      * chunks for each. Backs `GET /v1/documents`.
      */
-    fun listDocuments(): List<DocumentSummary> {
-        val all = box.all
-        return all.groupBy { it.documentId }
+    fun listDocuments(tenantId: String): List<DocumentSummary> {
+        val chunks = box.query(DocumentChunk_.tenantId.equal(tenantId))
+            .build()
+            .use { it.find() }
+        return chunks.groupBy { it.documentId }
             .map { (id, group) ->
                 DocumentSummary(
                     documentId = id,
@@ -58,9 +83,12 @@ class DocumentStore(context: Context) {
             .sortedBy { it.documentId }
     }
 
-    /** Remove every chunk associated with [documentId]. Returns how many were removed. */
-    fun deleteDocument(documentId: String): Int {
-        val ids = box.query(DocumentChunk_.documentId.equal(documentId))
+    /** Remove every chunk for [documentId] owned by [tenantId]. Returns how many were removed. */
+    fun deleteDocument(tenantId: String, documentId: String): Int {
+        val ids = box.query(
+            DocumentChunk_.documentId.equal(documentId)
+                .and(DocumentChunk_.tenantId.equal(tenantId)),
+        )
             .build()
             .use { it.findIds() }
         if (ids.isEmpty()) return 0
@@ -70,19 +98,55 @@ class DocumentStore(context: Context) {
 
     /**
      * Top-[k] nearest neighbours to [queryVec] (must be L2-normalised),
-     * restricted to chunks embedded with [embeddingModel]. Returns
-     * (chunk, distance) tuples where distance is the HNSW DOT_PRODUCT
-     * distance — lower = closer for unit-norm vectors.
+     * restricted to chunks embedded with [embeddingModel] and owned by
+     * [tenantId]. Returns (chunk, distance) tuples where distance is the HNSW
+     * DOT_PRODUCT distance — lower = closer for unit-norm vectors.
+     *
+     * ObjectBox HNSW does not compose cleanly with the tenant index, so we
+     * over-fetch candidates then filter post-hoc to preserve recall.
      */
-    fun nearest(queryVec: FloatArray, k: Int, embeddingModel: String): List<Pair<DocumentChunk, Float>> {
+    fun nearest(
+        tenantId: String,
+        queryVec: FloatArray,
+        k: Int,
+        embeddingModel: String,
+    ): List<Pair<DocumentChunk, Float>> {
+        val fetchK = maxOf(k * 4, 16)
         val query = box.query(
             DocumentChunk_.embedding
-                .nearestNeighbors(queryVec, k)
-                .and(DocumentChunk_.embeddingModel.equal(embeddingModel))
+                .nearestNeighbors(queryVec, fetchK)
+                .and(DocumentChunk_.embeddingModel.equal(embeddingModel)),
         ).build()
         return query.use {
-            it.findWithScores().map { ws -> ws.get() to ws.score.toFloat() }
+            it.findWithScores()
+                .map { ws -> ws.get() to ws.score.toFloat() }
+                .filter { (chunk, _) -> chunk.tenantId == tenantId }
+                .take(k)
         }
+    }
+
+    /** Global tenant inventory for `GET /v1/tenants`. */
+    fun listTenants(): List<TenantSummary> {
+        val all = box.all
+        return all.groupBy { it.tenantId }
+            .map { (id, group) ->
+                TenantSummary(
+                    tenantId = id,
+                    documentCount = group.map { it.documentId }.distinct().size,
+                    chunkCount = group.size,
+                )
+            }
+            .sortedBy { it.tenantId }
+    }
+
+    /** Remove every chunk for [tenantId]. Returns how many chunks were removed. */
+    fun deleteTenant(tenantId: String): Int {
+        val ids = box.query(DocumentChunk_.tenantId.equal(tenantId))
+            .build()
+            .use { it.findIds() }
+        if (ids.isEmpty()) return 0
+        box.remove(*ids)
+        return ids.size
     }
 
     fun close() {
@@ -95,5 +159,11 @@ class DocumentStore(context: Context) {
         val documentId: String,
         val chunkCount: Int,
         val embeddingModel: String,
+    )
+
+    data class TenantSummary(
+        val tenantId: String,
+        val documentCount: Int,
+        val chunkCount: Int,
     )
 }
