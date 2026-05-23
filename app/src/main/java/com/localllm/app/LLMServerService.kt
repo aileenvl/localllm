@@ -1638,7 +1638,15 @@ class LLMServerService : Service() {
     private fun isTensorSoc(): Boolean {
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S) return false
         val soc = android.os.Build.SOC_MODEL?.lowercase() ?: return false
-        return soc.contains("tensor")
+        // Pixels report the SoC codename via ro.soc.model, not the marketing
+        // name. Tensor G1..G4 → GS101/GS201/ZUMA/ZUMA_PRO; G5 → LAGUNA.
+        // Verified LAGUNA on a Pixel 10 device.
+        if (soc.contains("tensor")) return true
+        return soc.startsWith("gs10") ||
+            soc.startsWith("gs20") ||
+            soc == "zuma" ||
+            soc == "zuma_pro" ||
+            soc == "laguna"
     }
 
     /**
@@ -1773,6 +1781,25 @@ class LLMServerService : Service() {
         val modelFile = getModelFile(req.model)
         if (!modelFile.exists()) {
             throw IllegalStateException("Model file not found: ${modelFile.name}. Download or import it first.")
+        }
+
+        // NPU-compiled .litertlm files must be loaded with Backend.NPU. Other
+        // backends either (a) cleanly fail because the weights are quantized
+        // in a vendor-specific format the CPU/GPU paths can't decode, or (b)
+        // SIGABRT inside `liblitertlm_jni.so` with `bad_optional_access` —
+        // reproducible on Pixel 10 (LAGUNA) with the bundled Tensor dispatch
+        // lib. The crash kills the whole server and erases /health, so guard
+        // it here in pure Kotlin instead of relying on the native init to
+        // fail gracefully. Detect via filename and the catalog SoC marker;
+        // either signal is enough.
+        val isNpuFile = modelFile.name.contains("-npu-") ||
+            AVAILABLE_MODELS.firstOrNull { it.filename == modelFile.name }?.requiredSocMarker != null
+        if (isNpuFile && backendChoice != Settings.BACKEND_NPU) {
+            throw IllegalStateException(
+                "Model '${req.model}' is NPU-compiled and only runs with Backend = NPU/TPU. " +
+                "Open Settings → Inference → Backend, pick NPU/TPU, then try again. " +
+                "Current backend: $backendChoice."
+            )
         }
 
         LogManager.i("LLMServerService", "Loading engine for $cacheKey")
